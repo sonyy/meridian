@@ -1155,8 +1155,8 @@ const SETTINGS_MENUS = {
   maxPositions: { label: "📊 Max Positions", unit: "", presets: [1, 2, 3, 5, 10], current: () => `${config.risk.maxPositions}` },
   takeProfitPct: { label: "📈 TP %", unit: "%", presets: [5, 10, 15, 20, 30, 50], current: () => `${config.management.takeProfitPct}%` },
   stopLossPct: { label: "📉 SL %", unit: "%", presets: [5, 10, 15, 20, 25, 30], current: () => `${config.management.stopLossPct}%` },
-  managementIntervalMin: { label: "⏱ Manage Interval", unit: "m", presets: [1, 3, 5, 10, 15], current: () => `${config.management.managementIntervalMin}m` },
-  screeningIntervalMin: { label: "⏱ Screen Interval", unit: "m", presets: [10, 15, 30, 60], current: () => `${config.management.screeningIntervalMin}m` },
+  managementIntervalMin: { label: "⏱ Manage Interval", unit: "m", presets: [1, 3, 5, 10, 15], current: () => `${config.schedule.managementIntervalMin}m` },
+  screeningIntervalMin: { label: "⏱ Screen Interval", unit: "m", presets: [10, 15, 30, 60], current: () => `${config.schedule.screeningIntervalMin}m` },
 };
 
 function renderSettingsMenu() {
