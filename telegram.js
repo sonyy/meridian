@@ -418,26 +418,71 @@ export function stopPolling() {
 }
 
 // ─── Notification helpers ────────────────────────────────────────
-export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, rangeCoverage, binStep, baseFee }) {
+
+/**
+ * Unified deploy result message — used by both manual and auto deploy.
+ * type: "success" | "failed" | "blocked" | "nodeploy" | "skipped"
+ */
+export async function notifyDeployResult({
+  type,
+  pair,
+  amountSol,
+  position,
+  tx,
+  priceRange,
+  rangeCoverage,
+  binStep,
+  baseFee,
+  reason,
+}) {
   if (hasActiveLiveMessage()) return;
-  const priceStr = priceRange
-    ? `Price range: ${priceRange.min < 0.0001 ? priceRange.min.toExponential(3) : priceRange.min.toFixed(6)} – ${priceRange.max < 0.0001 ? priceRange.max.toExponential(3) : priceRange.max.toFixed(6)}\n`
-    : "";
-  const coverageStr = rangeCoverage
-    ? `Range cover: ${fmtPct(rangeCoverage.downside_pct)} downside | ${fmtPct(rangeCoverage.upside_pct)} upside | ${fmtPct(rangeCoverage.width_pct)} total\n`
-    : "";
-  const poolStr = (binStep || baseFee)
-    ? `Bin step: ${binStep ?? "?"}  |  Base fee: ${baseFee != null ? baseFee + "%" : "?"}\n`
-    : "";
-  await sendHTML(
-    `✅ <b>Deployed</b> ${pair}\n` +
-    `Amount: ${amountSol} SOL\n` +
-    priceStr +
-    coverageStr +
-    poolStr +
-    `Position: <code>${position?.slice(0, 8)}...</code>\n` +
-    `Tx: <code>${tx?.slice(0, 16)}...</code>`
-  );
+
+  let msg;
+  switch (type) {
+    case "success": {
+      const parts = [`✅ Deployed ${pair}`];
+      if (amountSol != null) parts.push(`Amount: ${amountSol} SOL`);
+      if (binStep || baseFee) {
+        parts.push(`Bin step: ${binStep ?? "?"}  |  Fee: ${baseFee != null ? baseFee + "%" : "?"}`);
+      }
+      if (priceRange) {
+        const pMin = priceRange.min < 0.0001 ? priceRange.min.toExponential(3) : priceRange.min.toFixed(6);
+        const pMax = priceRange.max < 0.0001 ? priceRange.max.toExponential(3) : priceRange.max.toFixed(6);
+        parts.push(`Price: ${pMin} – ${pMax}`);
+      }
+      if (rangeCoverage) {
+        parts.push(`Downside: ${fmtPct(rangeCoverage.downside_pct)}  |  Upside: ${fmtPct(rangeCoverage.upside_pct)}  |  Width: ${fmtPct(rangeCoverage.width_pct)}`);
+      }
+      if (position) parts.push(`Pos: <code>${position.slice(0, 8)}...</code>`);
+      if (tx) parts.push(`Tx: <code>${tx.slice(0, 16)}...</code>`);
+      msg = parts.join("\n");
+      break;
+    }
+    case "blocked": {
+      msg = `❌ Deploy blocked: ${pair ?? "?"}\nReason: ${reason ?? "Safety check failed"}`;
+      break;
+    }
+    case "failed": {
+      msg = `❌ Deploy failed: ${pair ?? "?"}\nError: ${reason ?? "Unknown error"}`;
+      break;
+    }
+    case "nodeploy": {
+      msg = `⛔ No deploy\n${reason ?? "LLM found no pool worth entering"}`;
+      break;
+    }
+    case "skipped": {
+      msg = `⏭️ Screening skipped\n${reason ?? "Pre-conditions not met"}`;
+      break;
+    }
+    default:
+      msg = `❓ Deploy result: ${reason ?? type}`;
+  }
+
+  await sendHTML(msg);
+}
+
+export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, rangeCoverage, binStep, baseFee }) {
+  return notifyDeployResult({ type: "success", pair, amountSol, position, tx, priceRange, rangeCoverage, binStep, baseFee });
 }
 
 export async function notifyClose({ pair, pnlUsd, pnlPct }) {
@@ -475,7 +520,6 @@ export async function notifyScreeningSummary({
   deployPoolName = null,
 }) {
   if (!TOKEN || !chatId) return;
-  if (hasActiveLiveMessage()) return;
 
   const lines = [`🔍 Screening Summary — ${totalScreened} pools scanned`];
 

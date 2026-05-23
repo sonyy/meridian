@@ -25,6 +25,7 @@ import {
   answerCallbackQuery,
   notifyOutOfRange,
   notifyScreeningSummary,
+  notifyDeployResult,
   isEnabled as telegramEnabled,
   createLiveMessage,
 } from "./telegram.js";
@@ -456,6 +457,9 @@ export async function runScreeningCycle({ silent = false } = {}) {
   } catch (e) {
     log("cron_error", `Screening pre-check failed: ${e.message}`);
     screenReport = `Screening pre-check failed: ${e.message}`;
+    if (!silent && telegramEnabled() && _notifyScreening) {
+      notifyDeployResult({ type: "skipped", reason: `Pre-check failed: ${e.message}` }).catch(() => {});
+    }
     _screeningBusy = false;
     return screenReport;
   }
@@ -665,13 +669,21 @@ export async function runScreeningCycle({ silent = false } = {}) {
 
     let deployAttempted = false;
     let deploySucceeded = false;
+
+    const bestFeeTvl = Math.max(...passing.map(p => p.pool.fee_active_tvl_ratio ?? 0));
+    const bestVol = Math.max(...passing.map(p => p.pool.volume_window ?? 0));
+    const bestOrganic = Math.max(...passing.map(p => p.pool.organic_score ?? 0));
+    const comparisonHeader = passing.length > 1
+      ? `CANDIDATE COMPARISON — best fee_tvl=${bestFeeTvl}%, best vol=$${bestVol}, best organic=${bestOrganic}\nPick the candidate with the best balance of fee_tvl_ratio, volume, and bin_step suited to its volatility.\n`
+      : "";
+
     const { content } = await agentLoop(`
 SCREENING CYCLE
 ${strategyBlock}
 Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL
 
 PRE-LOADED CANDIDATES (${passing.length} pools):
-${candidateBlocks.join("\n\n")}
+${comparisonHeader}${candidateBlocks.join("\n\n")}
 
 STEPS:
 1. Decide if any candidate is actually worth deploying. One surviving candidate is not automatically good enough.
@@ -943,16 +955,17 @@ function formatCandidates(candidates) {
 
   const lines = candidates.map((p, i) => {
     const name = (p.name || "unknown").padEnd(20);
+    const bs = ` ${p.bin_step ?? "?"}bps`.padStart(8);
     const ftvl = `${p.fee_active_tvl_ratio ?? p.fee_tvl_ratio}%`.padStart(8);
     const vol = `$${((p.volume_window || 0) / 1000).toFixed(1)}k`.padStart(8);
     const active = `${p.active_pct}%`.padStart(6);
     const org = String(p.organic_score).padStart(4);
-    return `  [${i + 1}]  ${name}  fee/aTVL:${ftvl}  vol:${vol}  in-range:${active}  organic:${org}`;
+    return `  [${i + 1}]  ${name}${bs}  fee/aTVL:${ftvl}  vol:${vol}  in-range:${active}  organic:${org}`;
   });
 
   return [
-    "  #   pool                  fee/aTVL     vol    in-range  organic",
-    "  " + "─".repeat(68),
+    "  #   pool                  step  fee/aTVL     vol    in-range  organic",
+    "  " + "─".repeat(72),
     ...lines,
   ].join("\n");
 }
@@ -1067,6 +1080,22 @@ function formatConfigSnapshot() {
     `Intervals: manage ${config.schedule.managementIntervalMin}m | screen ${config.schedule.screeningIntervalMin}m`,
     `HiveMind: ${isHiveMindEnabled() ? "enabled" : "disabled"}${config.hiveMind.agentId ? ` | ${config.hiveMind.agentId}` : ""}`,
   ].join("\n");
+}
+
+function getSettingLabel(key) {
+  return SETTINGS_MENUS[key]?.label ?? key;
+}
+
+function getSettingUnit(key) {
+  return SETTINGS_MENUS[key]?.unit ?? "";
+}
+
+function formatSettingConfirm(key, oldVal, newVal) {
+  const label = getSettingLabel(key);
+  const unit = getSettingUnit(key);
+  const oldStr = oldVal != null ? `${oldVal}${unit}` : "?";
+  const newStr = `${newVal}${unit}`;
+  return `✅ ${label}\n${oldStr} → ${newStr}`;
 }
 
 function parseConfigValue(raw) {
@@ -1255,6 +1284,7 @@ async function applySettingsMenuCallback(msg) {
     const key = parts[2];
     const rawValue = parts.slice(3).join(":");
     const value = normalizeMenuValue(key, rawValue);
+    const oldVal = settingValue(key);
     const result = await executeTool("update_config", {
       changes: { [key]: value },
       reason: "Telegram settings menu",
@@ -1264,7 +1294,7 @@ async function applySettingsMenuCallback(msg) {
       return;
     }
     await answerCallbackQuery(msg.callbackQueryId);
-    await sendMessage(`✅ ${key} set to ${value}`).catch(() => {});
+    await sendMessage(formatSettingConfirm(key, oldVal, value)).catch(() => {});
     await editMessageWithButtons(renderSettingsSubmenu(key).text, msg.messageId, renderSettingsSubmenu(key).keyboard);
     return;
   }
@@ -1505,24 +1535,41 @@ async function handleDeployCallback(msg) {
         initial_value_usd: candidate.tvl ?? candidate.active_tvl ?? null,
       });
 
-      if (result?.blocked || result?.success === false || result?.error) {
-        throw new Error(result?.reason || result?.error || "Deploy failed");
+      const resultType = result?.blocked ? "blocked" : (result?.success === false || result?.error ? "failed" : null);
+      if (resultType) {
+        throw Object.assign(new Error(result?.reason || result?.error || "Deploy failed"), { deployResultType: resultType, deployPair: candidate.name });
       }
 
-      const coverage = result.range_coverage
-        ? `Range: ${fmtPct(result.range_coverage.downside_pct)} downside | ${fmtPct(result.range_coverage.upside_pct)} upside`
-        : `Strategy: ${config.strategy.strategy} | binsBelow: ${binsBelow}`;
+      const successLines = [`✅ Deployed ${candidate.name}`];
+      successLines.push(`Amount: ${amount} SOL`);
+      if (candidate.bin_step || candidate.base_fee) {
+        successLines.push(`Bin step: ${candidate.bin_step ?? "?"}  |  Fee: ${candidate.base_fee != null ? candidate.base_fee + "%" : "?"}`);
+      }
+      if (result.range_coverage) {
+        successLines.push(`Downside: ${fmtPct(result.range_coverage.downside_pct)}  |  Upside: ${fmtPct(result.range_coverage.upside_pct)}  |  Width: ${fmtPct(result.range_coverage.width_pct)}`);
+      }
+      if (result.position) successLines.push(`Pos: ${result.position.slice(0, 8)}...`);
+      if (result.txs?.length) successLines.push(`Tx: ${result.txs[0]}`);
 
-      await editMessage([
-        `✅ Deployed ${candidate.name}`,
-        `Pool: ${candidate.pool}`,
-        `Amount: ${amount} SOL`,
-        coverage,
-        result.position ? `Position: ${result.position.slice(0, 8)}...` : null,
-        result.txs?.length ? `Tx: ${result.txs[0]}` : null,
-      ].filter(Boolean).join("\n"), msg.messageId);
+      await editMessage(successLines.join("\n"), msg.messageId);
+
+      notifyDeployResult({
+        type: "success",
+        pair: candidate.name,
+        amountSol: amount,
+        position: result.position,
+        tx: result.txs?.[0],
+        priceRange: result.price_range,
+        rangeCoverage: result.range_coverage,
+        binStep: candidate.bin_step,
+        baseFee: candidate.base_fee,
+      }).catch(() => {});
     } catch (e) {
-      await editMessage(`❌ Deploy failed: ${e.message}`, msg.messageId);
+      const failType = e.deployResultType || "failed";
+      const failPair = e.deployPair || candidate.name;
+      const failReason = e.message;
+      await editMessage(`❌ Deploy ${failType === "blocked" ? "blocked" : "failed"}: ${failPair}\nReason: ${failReason}`, msg.messageId);
+      notifyDeployResult({ type: failType, pair: failPair, reason: failReason }).catch(() => {});
     }
 
     _pendingDeployAmount.delete(chatId);
@@ -1688,7 +1735,7 @@ async function handleMenuCallback(msg) {
     try {
       const result = await runDeterministicScreen(5);
       await editMessageWithButtons(result, msg.messageId, [
-        [{ text: "🔄 Refresh", callback_data: "menu:screen" }],
+        [{ text: "🔄 Refresh", callback_data: "menu:run_screen" }],
         [backButton("screen")[0], { text: "❌", callback_data: "menu:close" }],
       ]);
     } catch (e) {
@@ -2119,17 +2166,7 @@ async function telegramHandler(msg) {
     setTimeout(() => process.exit(0), 500);
     return;
   }
-  if (_managementBusy || _screeningBusy || busy) {
-    if (_telegramQueue.length < 5) {
-      _telegramQueue.push(msg);
-      sendMessage(`⏳ Queued (${_telegramQueue.length} in queue): "${text.slice(0, 60)}"`).catch(() => {});
-    } else {
-      sendMessage("Queue is full (5 messages). Wait for the agent to finish.").catch(() => {});
-    }
-    return;
-  }
-
-  // Intercept custom deploy amount input
+  // Intercept custom deploy amount input — must run BEFORE busy check
   if (_pendingCustomAmount.has(msg.chat?.id)) {
     _pendingCustomAmount.delete(msg.chat?.id);
     const amount = parseFloat(text);
@@ -2141,7 +2178,7 @@ async function telegramHandler(msg) {
     return;
   }
 
-  // Intercept custom setting value input
+  // Intercept custom setting value input — must run BEFORE busy check
   if (_pendingCustomSetting.has(msg.chat?.id)) {
     const key = _pendingCustomSetting.get(msg.chat?.id);
     _pendingCustomSetting.delete(msg.chat?.id);
@@ -2158,6 +2195,7 @@ async function telegramHandler(msg) {
       await sendMessage("❌ Minimum deploy amount is 0.001 SOL.").catch(() => {});
       return;
     }
+    const oldVal = settingValue(key);
     const result = await executeTool("update_config", {
       changes: { [key]: value },
       reason: "Telegram settings custom input",
@@ -2165,7 +2203,18 @@ async function telegramHandler(msg) {
     if (!result?.success) {
       await sendMessage("❌ Update failed.").catch(() => {});
     } else {
-      await sendMessage(`✅ ${key} set to ${value}`).catch(() => {});
+      await sendMessage(formatSettingConfirm(key, oldVal, value)).catch(() => {});
+      await showSettingsMenu().catch(() => {});
+    }
+    return;
+  }
+
+  if (_managementBusy || _screeningBusy || busy) {
+    if (_telegramQueue.length < 5) {
+      _telegramQueue.push(msg);
+      sendMessage(`⏳ Queued (${_telegramQueue.length} in queue): "${text.slice(0, 60)}"`).catch(() => {});
+    } else {
+      sendMessage("Queue is full (5 messages). Wait for the agent to finish.").catch(() => {});
     }
     return;
   }
