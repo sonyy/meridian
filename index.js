@@ -1167,7 +1167,7 @@ function renderSettingsMenu() {
   }
   rows.push([settingButton("🎯 Strategy", "cfg:show:strategy")]);
   rows.push([settingButton("📄 Config Snapshot", "cfg:show:config_snapshot")]);
-  rows.push([settingButton("🔄 Refresh", "cfg:page:main"), settingButton("❌", "cfg:close")]);
+  rows.push([{ text: "◀️", callback_data: "menu:main" }, settingButton("🔄", "cfg:page:main"), { text: "❌", callback_data: "cfg:close" }]);
   return { text, keyboard: rows };
 }
 
@@ -1179,7 +1179,7 @@ function renderSettingsSubmenu(key) {
       keyboard: [
         [settingButton(current === "spot" ? "• spot" : "  spot", "cfg:set:strategy:spot")],
         [settingButton(current === "bid_ask" ? "• bid_ask" : "  bid_ask", "cfg:set:strategy:bid_ask")],
-        backButton("settings"),
+        [{ text: "◀️", callback_data: "cfg:back" }, { text: "❌", callback_data: "cfg:close" }],
       ],
     };
   }
@@ -1195,7 +1195,7 @@ function renderSettingsSubmenu(key) {
     rows.push(presetButtons.slice(i, i + 3));
   }
   rows.push([settingButton("✏️ Custom", `cfg:custom:${key}`)]);
-  rows.push(backButton("settings"));
+  rows.push([{ text: "◀️", callback_data: "cfg:back" }, { text: "❌", callback_data: "cfg:close" }]);
   return { text, keyboard: rows };
 }
 
@@ -1245,7 +1245,7 @@ async function applySettingsMenuCallback(msg) {
     const key = parts[2];
     await answerCallbackQuery(msg.callbackQueryId);
     if (key === "config_snapshot") {
-      await editMessageWithButtons(formatConfigSnapshot(), msg.messageId, [[settingButton("← Settings", "cfg:page:main")]]);
+      await editMessageWithButtons(formatConfigSnapshot(), msg.messageId, [[{ text: "◀️", callback_data: "cfg:back" }, { text: "❌", callback_data: "cfg:close" }]]);
     } else {
       const menu = renderSettingsSubmenu(key);
       await editMessageWithButtons(menu.text, msg.messageId, menu.keyboard);
