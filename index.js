@@ -3,6 +3,7 @@ import cron from "node-cron";
 import readline from "readline";
 import path from "path";
 import { fileURLToPath } from "url";
+import { readFileSync, writeFileSync, existsSync } from "fs";
 import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
@@ -17,10 +18,13 @@ import {
   sendMessage,
   sendMessageWithButtons,
   sendHTML,
+  sendHTMLWithButtons,
   editMessage,
   editMessageWithButtons,
+  editHTMLWithButtons,
   answerCallbackQuery,
   notifyOutOfRange,
+  notifyScreeningSummary,
   isEnabled as telegramEnabled,
   createLiveMessage,
 } from "./telegram.js";
@@ -51,6 +55,33 @@ if (isMain) {
 
 const TP_PCT = config.management.takeProfitPct;
 const DEPLOY = config.management.deployAmountSol;
+
+// Maps chatId -> { amount } for multi-step deploy flow via Telegram buttons
+const _pendingDeployAmount = new Map();  // chatId -> amount (for multi-step deploy flow)
+const _pendingCustomAmount = new Map();  // chatId -> true (waiting for user to type custom amount)
+const _pendingCustomSetting = new Map(); // chatId -> settingKey (waiting for user to type setting value)
+let _notifyManagement = true;
+let _notifyScreening = true;
+
+// Load persisted notification flags from state.json
+function loadNotifFlags() {
+  try {
+    if (existsSync("./state.json")) {
+      const state = JSON.parse(readFileSync("./state.json", "utf8"));
+      if (typeof state._notifyManagement === "boolean") _notifyManagement = state._notifyManagement;
+      if (typeof state._notifyScreening === "boolean") _notifyScreening = state._notifyScreening;
+    }
+  } catch (e) {}
+}
+function saveNotifFlags() {
+  try {
+    const state = JSON.parse(readFileSync("./state.json", "utf8"));
+    state._notifyManagement = _notifyManagement;
+    state._notifyScreening = _notifyScreening;
+    writeFileSync("./state.json", JSON.stringify(state, null, 2));
+  } catch (e) {}
+}
+loadNotifFlags();
 
 // ═══════════════════════════════════════════
 //  CYCLE TIMERS
@@ -207,7 +238,7 @@ export async function runManagementCycle({ silent = false } = {}) {
   const screeningCooldownMs = 5 * 60 * 1000;
 
   try {
-    if (!silent && telegramEnabled()) {
+    if (!silent && telegramEnabled() && _notifyManagement) {
       liveMessage = await createLiveMessage("🔄 Management Cycle", "Evaluating positions...");
     }
     const livePositions = await getMyPositions({ force: true }).catch(() => null);
@@ -361,7 +392,7 @@ After executing, write a brief one-line result per position.
     mgmtReport = `Management cycle failed: ${error.message}`;
   } finally {
     _managementBusy = false;
-    if (!silent && telegramEnabled()) {
+    if (!silent && telegramEnabled() && _notifyManagement) {
       if (mgmtReport) {
         if (liveMessage) await liveMessage.finalize(stripThink(mgmtReport)).catch(() => {});
         else sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
@@ -399,6 +430,9 @@ export async function runScreeningCycle({ silent = false } = {}) {
         summary: "Screening skipped",
         reason: `Max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`,
       });
+      if (!silent && telegramEnabled() && _notifyScreening) {
+        notifyScreeningSummary({ totalScreened: 0, passingCount: 0, finalDecision: "skipped" });
+      }
       _screeningBusy = false;
       return screenReport;
     }
@@ -413,6 +447,9 @@ export async function runScreeningCycle({ silent = false } = {}) {
         summary: "Screening skipped",
         reason: `Insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired})`,
       });
+      if (!silent && telegramEnabled() && _notifyScreening) {
+        notifyScreeningSummary({ totalScreened: 0, passingCount: 0, finalDecision: "skipped" });
+      }
       _screeningBusy = false;
       return screenReport;
     }
@@ -422,7 +459,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     _screeningBusy = false;
     return screenReport;
   }
-  if (!silent && telegramEnabled()) {
+  if (!silent && telegramEnabled() && _notifyScreening) {
     liveMessage = await createLiveMessage("🔍 Screening Cycle", "Scanning candidates...");
   }
   timers.screeningLastRun = Date.now();
@@ -501,6 +538,15 @@ export async function runScreeningCycle({ silent = false } = {}) {
         reason: combinedExamples || "All candidates filtered before deploy",
         rejected: combined.slice(0, 5).map((entry) => `${entry.name}: ${entry.reason}`),
       });
+      if (!silent && telegramEnabled() && _notifyScreening) {
+        notifyScreeningSummary({
+          totalScreened: topCandidates?.total_screened ?? candidates.length,
+          filteredExamples: earlyFilteredExamples,
+          additionalFiltered: filteredOut,
+          passingCount: 0,
+          finalDecision: "no_deploy",
+        });
+      }
       return screenReport;
     }
 
@@ -530,6 +576,15 @@ export async function runScreeningCycle({ silent = false } = {}) {
           pool: passing[0].pool?.pool,
           pool_name: candidateName,
         });
+        if (!silent && telegramEnabled() && _notifyScreening) {
+          notifyScreeningSummary({
+            totalScreened: topCandidates?.total_screened ?? candidates.length,
+            filteredExamples: earlyFilteredExamples,
+            additionalFiltered: filteredOut,
+            passingCount: 1,
+            finalDecision: "no_deploy",
+          });
+        }
         return screenReport;
       }
     }
@@ -695,7 +750,8 @@ IMPORTANT:
         },
       });
     screenReport = content;
-    if (/⛔\s*NO DEPLOY/i.test(content)) {
+    const isNoDeploy = /⛔\s*NO DEPLOY/i.test(content);
+    if (isNoDeploy) {
       appendDecision({
         type: "no_deploy",
         actor: "SCREENER",
@@ -710,12 +766,21 @@ IMPORTANT:
         reason: stripThink(content).slice(0, 500),
       });
     }
+    if (!silent && telegramEnabled() && _notifyScreening && (isNoDeploy || !deploySucceeded)) {
+      notifyScreeningSummary({
+        totalScreened: topCandidates?.total_screened ?? candidates.length,
+        filteredExamples: earlyFilteredExamples,
+        additionalFiltered: filteredOut,
+        passingCount: passing.length,
+        finalDecision: "no_deploy",
+      });
+    }
   } catch (error) {
     log("cron_error", `Screening cycle failed: ${error.message}`);
     screenReport = `Screening cycle failed: ${error.message}`;
   } finally {
     _screeningBusy = false;
-    if (!silent && telegramEnabled()) {
+    if (!silent && telegramEnabled() && _notifyScreening) {
       if (screenReport) {
         if (liveMessage) await liveMessage.finalize(stripThink(screenReport)).catch(() => {});
         else sendMessage(`🔍 Screening Cycle\n\n${stripThink(screenReport)}`).catch(() => { });
@@ -1051,127 +1116,62 @@ function settingValue(key) {
   return values[key];
 }
 
-function fmtSettingValue(value) {
-  if (Array.isArray(value)) return value.join(",");
-  if (typeof value === "boolean") return value ? "on" : "off";
-  return String(value);
-}
-
 function settingButton(label, data) {
   return { text: label, callback_data: data };
 }
 
-function toggleButton(key, label) {
-  return settingButton(`${label}: ${fmtSettingValue(settingValue(key))}`, `cfg:toggle:${key}`);
+const SETTINGS_MENUS = {
+  deployAmountSol: { label: "💰 Deploy Amount", unit: " SOL", presets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.2, 0.5, 1], current: () => `${config.management.deployAmountSol} SOL` },
+  gasReserve: { label: "⛽ Gas Reserve", unit: " SOL", presets: [0.05, 0.1, 0.15, 0.2, 0.3, 0.5], current: () => `${config.management.gasReserve} SOL` },
+  maxPositions: { label: "📊 Max Positions", unit: "", presets: [1, 2, 3, 5, 10], current: () => `${config.risk.maxPositions}` },
+  takeProfitPct: { label: "📈 TP %", unit: "%", presets: [5, 10, 15, 20, 30, 50], current: () => `${config.management.takeProfitPct}%` },
+  stopLossPct: { label: "📉 SL %", unit: "%", presets: [5, 10, 15, 20, 25, 30], current: () => `${config.management.stopLossPct}%` },
+  managementIntervalMin: { label: "⏱ Manage Interval", unit: "m", presets: [1, 3, 5, 10, 15], current: () => `${config.management.managementIntervalMin}m` },
+  screeningIntervalMin: { label: "⏱ Screen Interval", unit: "m", presets: [10, 15, 30, 60], current: () => `${config.management.screeningIntervalMin}m` },
+};
+
+function renderSettingsMenu() {
+  const text = "⚙️ Settings\n\nSelect a setting to adjust:";
+  const rows = [];
+  for (const [key, def] of Object.entries(SETTINGS_MENUS)) {
+    rows.push([settingButton(`${def.label} (${def.current()})`, `cfg:show:${key}`)]);
+  }
+  rows.push([settingButton("🎯 Strategy", "cfg:show:strategy")]);
+  rows.push([settingButton("📄 Config Snapshot", "cfg:show:config_snapshot")]);
+  rows.push([settingButton("🔄 Refresh", "cfg:page:main"), settingButton("❌", "cfg:close")]);
+  return { text, keyboard: rows };
 }
 
-function stepButtons(key, label, step, { digits = 2 } = {}) {
-  const value = Number(settingValue(key));
-  const shown = Number.isFinite(value) ? value.toFixed(digits).replace(/\.?0+$/, "") : "?";
-  return [
-    settingButton(`- ${label}`, `cfg:step:${key}:${-step}`),
-    settingButton(`${label}: ${shown}`, `cfg:noop`),
-    settingButton(`+ ${label}`, `cfg:step:${key}:${step}`),
-  ];
-}
-
-function renderSettingsMenu(page = "main") {
-  const title = page === "main" ? "Settings menu" : `Settings: ${page}`;
-  const summary = [
-    title,
-    "",
-    `Mode: ${config.management.solMode ? "SOL" : "USD"} | Relay: ${config.api.lpAgentRelayEnabled ? "on" : "off"}`,
-    `Strategy: ${config.strategy.strategy} | bins ${config.strategy.minBinsBelow}-${config.strategy.maxBinsBelow} | deploy ${config.management.deployAmountSol} SOL`,
-    `TP/SL: ${config.management.takeProfitPct}% / ${config.management.stopLossPct}% | trailing ${config.management.trailingTakeProfit ? "on" : "off"}`,
-    `Indicators: ${config.indicators.enabled ? "on" : "off"} | entry ${config.indicators.entryPreset} | ${fmtSettingValue(config.indicators.intervals)}`,
-  ].join("\n");
-
-  const nav = [
-    [
-      settingButton("Main", "cfg:page:main"),
-      settingButton("Risk", "cfg:page:risk"),
-      settingButton("Screen", "cfg:page:screen"),
-      settingButton("Indicators", "cfg:page:indicators"),
-    ],
-  ];
-
-  const footer = [
-    [
-      settingButton("Refresh", `cfg:page:${page}`),
-      settingButton("Close", "cfg:close"),
-    ],
-  ];
-
-  let rows;
-  if (page === "risk") {
-    rows = [
-      stepButtons("deployAmountSol", "Deploy", 0.1),
-      stepButtons("gasReserve", "Gas", 0.05),
-      stepButtons("maxPositions", "Max pos", 1, { digits: 0 }),
-      stepButtons("maxDeployAmount", "Max SOL", 1, { digits: 0 }),
-      stepButtons("takeProfitPct", "TP %", 1, { digits: 0 }),
-      stepButtons("stopLossPct", "SL %", 5, { digits: 0 }),
-      [toggleButton("trailingTakeProfit", "Trailing TP")],
-      stepButtons("trailingTriggerPct", "Trail trigger", 0.5, { digits: 1 }),
-      stepButtons("trailingDropPct", "Trail drop", 0.5, { digits: 1 }),
-      [toggleButton("repeatDeployCooldownEnabled", "Repeat cooldown")],
-      stepButtons("repeatDeployCooldownTriggerCount", "Repeat count", 1, { digits: 0 }),
-      stepButtons("repeatDeployCooldownHours", "Repeat hrs", 1, { digits: 0 }),
-      stepButtons("repeatDeployCooldownMinFeeEarnedPct", "Fee earned %", 0.1, { digits: 1 }),
-    ];
-  } else if (page === "screen") {
-    rows = [
-      [toggleButton("useDiscordSignals", "Discord signals"), toggleButton("blockPvpSymbols", "PVP hard block")],
-      [
-        settingButton(`Strategy: spot`, "cfg:set:strategy:spot"),
-        settingButton(`Strategy: bid_ask`, "cfg:set:strategy:bid_ask"),
+function renderSettingsSubmenu(key) {
+  if (key === "strategy") {
+    const current = config.strategy.strategy;
+    return {
+      text: `🎯 Strategy\n\nCurrent: ${current}\n\nSelect strategy:`,
+      keyboard: [
+        [settingButton(current === "spot" ? "• spot" : "  spot", "cfg:set:strategy:spot")],
+        [settingButton(current === "bid_ask" ? "• bid_ask" : "  bid_ask", "cfg:set:strategy:bid_ask")],
+        backButton("settings"),
       ],
-      stepButtons("minBinsBelow", "Min bins", 1, { digits: 0 }),
-      stepButtons("maxBinsBelow", "Max bins", 1, { digits: 0 }),
-      stepButtons("defaultBinsBelow", "Default bins", 1, { digits: 0 }),
-      stepButtons("managementIntervalMin", "Manage min", 1, { digits: 0 }),
-      stepButtons("screeningIntervalMin", "Screen min", 5, { digits: 0 }),
-    ];
-  } else if (page === "indicators") {
-    rows = [
-      [toggleButton("chartIndicatorsEnabled", "Chart indicators"), toggleButton("requireAllIntervals", "Require all TF")],
-      [
-        settingButton("TF: 5m", "cfg:set:indicatorIntervals:5_MINUTE"),
-        settingButton("TF: 15m", "cfg:set:indicatorIntervals:15_MINUTE"),
-        settingButton("TF: both", "cfg:set:indicatorIntervals:both"),
-      ],
-      [
-        settingButton("Entry: ST", "cfg:set:indicatorEntryPreset:supertrend_break"),
-        settingButton("Entry: RSI", "cfg:set:indicatorEntryPreset:rsi_reversal"),
-        settingButton("Entry: ST/RSI", "cfg:set:indicatorEntryPreset:supertrend_or_rsi"),
-      ],
-      [
-        settingButton("Exit: ST", "cfg:set:indicatorExitPreset:supertrend_break"),
-        settingButton("Exit: RSI", "cfg:set:indicatorExitPreset:rsi_reversal"),
-        settingButton("Exit: BB+RSI", "cfg:set:indicatorExitPreset:bb_plus_rsi"),
-      ],
-      stepButtons("rsiLength", "RSI len", 1, { digits: 0 }),
-    ];
-  } else {
-    rows = [
-      [toggleButton("solMode", "SOL mode"), toggleButton("lpAgentRelayEnabled", "LPAgent relay")],
-      [toggleButton("chartIndicatorsEnabled", "Chart indicators"), toggleButton("trailingTakeProfit", "Trailing TP")],
-      [
-        settingButton("Risk / deploy", "cfg:page:risk"),
-        settingButton("Screening", "cfg:page:screen"),
-      ],
-      [
-        settingButton("Indicators", "cfg:page:indicators"),
-        settingButton("Show config", "cfg:show"),
-      ],
-    ];
+    };
   }
 
-  return { text: summary, keyboard: [...nav, ...rows, ...footer] };
+  const def = SETTINGS_MENUS[key];
+  if (!def) return renderSettingsMenu();
+
+  const currentVal = Number(settingValue(key));
+  const text = `${def.label}\n\nCurrent: ${def.current()}\n\nSelect value:`;
+  const presetButtons = def.presets.map((p) => settingButton(`${p}${def.unit}`, `cfg:set:${key}:${p}`));
+  const rows = [];
+  for (let i = 0; i < presetButtons.length; i += 3) {
+    rows.push(presetButtons.slice(i, i + 3));
+  }
+  rows.push([settingButton("✏️ Custom", `cfg:custom:${key}`)]);
+  rows.push(backButton("settings"));
+  return { text, keyboard: rows };
 }
 
-async function showSettingsMenu({ messageId = null, page = "main" } = {}) {
-  const menu = renderSettingsMenu(page);
+async function showSettingsMenu({ messageId = null } = {}) {
+  const menu = renderSettingsMenu();
   if (messageId) {
     await editMessageWithButtons(menu.text, messageId, menu.keyboard);
   } else {
@@ -1191,7 +1191,6 @@ async function applySettingsMenuCallback(msg) {
   const data = msg.callbackData || msg.text || "";
   const parts = data.split(":");
   const action = parts[1];
-  let page = "main";
 
   if (action === "noop") {
     await answerCallbackQuery(msg.callbackQueryId);
@@ -1202,65 +1201,82 @@ async function applySettingsMenuCallback(msg) {
     await editMessage("Settings menu closed.", msg.messageId);
     return;
   }
-  if (action === "show") {
-    await answerCallbackQuery(msg.callbackQueryId);
-    await editMessageWithButtons(formatConfigSnapshot(), msg.messageId, [[settingButton("Back", "cfg:page:main")]]);
-    return;
-  }
   if (action === "page") {
-    page = parts[2] || "main";
     await answerCallbackQuery(msg.callbackQueryId);
-    await showSettingsMenu({ messageId: msg.messageId, page });
+    if (parts[2] && parts[2] !== "main") {
+      const menu = renderSettingsSubmenu(parts[2]);
+      await editMessageWithButtons(menu.text, msg.messageId, menu.keyboard);
+    } else {
+      await showSettingsMenu({ messageId: msg.messageId });
+    }
     return;
   }
 
-  const key = parts[2];
-  let value;
-  if (action === "toggle") {
-    value = !Boolean(settingValue(key));
-  } else if (action === "step") {
-    const current = Number(settingValue(key));
-    const delta = Number(parts[3]);
-    if (!Number.isFinite(current) || !Number.isFinite(delta)) {
-      await answerCallbackQuery(msg.callbackQueryId, "Invalid setting");
+  if (action === "show") {
+    const key = parts[2];
+    await answerCallbackQuery(msg.callbackQueryId);
+    if (key === "config_snapshot") {
+      await editMessageWithButtons(formatConfigSnapshot(), msg.messageId, [[settingButton("← Settings", "cfg:page:main")]]);
+    } else {
+      const menu = renderSettingsSubmenu(key);
+      await editMessageWithButtons(menu.text, msg.messageId, menu.keyboard);
+    }
+    return;
+  }
+
+  if (action === "custom") {
+    const key = parts[2];
+    const def = SETTINGS_MENUS[key];
+    await answerCallbackQuery(msg.callbackQueryId);
+    _pendingCustomSetting.set(msg.chat?.id, key);
+    await editMessageWithButtons(
+      `✏️ ${def?.label || key}\n\nType the new value (e.g. ${def.presets[0]}${def.unit}):`,
+      msg.messageId,
+      [[{ text: "◀️", callback_data: "cfg:back" }, { text: "❌", callback_data: "cfg:cancel" }]]
+    );
+    return;
+  }
+
+  if (action === "cancel") {
+    await answerCallbackQuery(msg.callbackQueryId, "Cancelled");
+    _pendingCustomSetting.delete(msg.chat?.id);
+    await editMessage("Settings edit cancelled.", msg.messageId);
+    return;
+  }
+
+  if (action === "back") {
+    await answerCallbackQuery(msg.callbackQueryId);
+    _pendingCustomSetting.delete(msg.chat?.id);
+    await showSettingsMenu({ messageId: msg.messageId });
+    return;
+  }
+
+  if (action === "set") {
+    const key = parts[2];
+    const rawValue = parts.slice(3).join(":");
+    const value = normalizeMenuValue(key, rawValue);
+    const result = await executeTool("update_config", {
+      changes: { [key]: value },
+      reason: "Telegram settings menu",
+    });
+    if (!result?.success) {
+      await answerCallbackQuery(msg.callbackQueryId, "❌ Update failed");
       return;
     }
-    value = Number((current + delta).toFixed(4));
-    if (key === "maxPositions") value = Math.max(1, Math.round(value));
-    if (key === "rsiLength") value = Math.max(2, Math.round(value));
-    if (key === "repeatDeployCooldownTriggerCount") value = Math.max(1, Math.round(value));
-    if (key === "repeatDeployCooldownHours") value = Math.max(0, Math.round(value));
-    if (key === "repeatDeployCooldownMinFeeEarnedPct") value = Math.max(0, value);
-    if (["minBinsBelow", "maxBinsBelow", "defaultBinsBelow"].includes(key)) value = Math.max(35, Math.round(value));
-    if (["deployAmountSol", "gasReserve", "maxDeployAmount"].includes(key)) value = Math.max(0, value);
-  } else if (action === "set") {
-    value = normalizeMenuValue(key, parts.slice(3).join(":"));
-  } else {
-    await answerCallbackQuery(msg.callbackQueryId, "Unknown action");
+    await answerCallbackQuery(msg.callbackQueryId);
+    await sendMessage(`✅ ${key} set to ${value}`).catch(() => {});
+    await editMessageWithButtons(renderSettingsSubmenu(key).text, msg.messageId, renderSettingsSubmenu(key).keyboard);
     return;
   }
 
-  const result = await executeTool("update_config", {
-    changes: { [key]: value },
-    reason: "Telegram settings menu",
-  });
-  if (!result?.success) {
-    await answerCallbackQuery(msg.callbackQueryId, "Config update failed");
-    return;
-  }
-  page = key.startsWith("indicator") || key === "chartIndicatorsEnabled" || key === "rsiLength" || key === "requireAllIntervals"
-    ? "indicators"
-    : ["useDiscordSignals", "blockPvpSymbols", "strategy", "minBinsBelow", "maxBinsBelow", "defaultBinsBelow", "managementIntervalMin", "screeningIntervalMin"].includes(key)
-      ? "screen"
-      : "risk";
-  await answerCallbackQuery(msg.callbackQueryId, `Updated ${key}`);
-  await showSettingsMenu({ messageId: msg.messageId, page });
+  await answerCallbackQuery(msg.callbackQueryId, "Unknown action");
 }
 
 function formatHelpText() {
   return [
     "Telegram commands",
     "",
+    "/start or /menu — show main menu with buttons",
     "/help — show commands",
     "/status — wallet + positions snapshot",
     "/wallet — wallet, deploy amount, HiveMind status",
@@ -1274,8 +1290,10 @@ function formatHelpText() {
     "/setcfg <key> <value> — update persisted config",
     "/screen — refresh deterministic candidate list",
     "/candidates — show latest cached candidates",
+    "/deploy — choose amount and deploy via buttons",
     "/deploy <n> — deploy candidate by cached index",
     "/briefing — morning briefing",
+    "/notifications — toggle notification on/off",
     "/hive — HiveMind sync status",
     "/hive pull — manual HiveMind pull now",
     "/pause — stop cron cycles",
@@ -1288,20 +1306,24 @@ async function runDeterministicScreen(limit = 5) {
   const top = await getTopCandidates({ limit });
   const candidates = (top?.candidates || top?.pools || []).slice(0, limit);
   setLatestCandidates(candidates);
+  const totalScreened = top?.total_screened ?? candidates.length;
+  const filteredExamples = (top?.filtered_examples || []).slice(0, 5);
+  const lines = [`🔍 Screening Summary — ${totalScreened} pools scanned`];
+  if (filteredExamples.length > 0) {
+    lines.push(`Filtered: ${filteredExamples.length} pool(s)`);
+    filteredExamples.forEach((f) => lines.push(`  • ${f.name}: ${f.reason}`));
+  }
   if (candidates.length > 0) {
-    const lines = candidates.map((pool, i) => {
+    lines.push(`Passed: ${candidates.length} pool(s)`);
+    candidates.forEach((pool, i) => {
       const feeTvl = pool.fee_active_tvl_ratio ?? pool.fee_tvl_ratio ?? "?";
       const vol = pool.volume_window ?? pool.volume_24h ?? "?";
-      return `${i + 1}. ${pool.name} | ${pool.pool}\n   fee/aTVL ${feeTvl}% | vol $${vol} | organic ${pool.organic_score ?? "?"}`;
+      lines.push(`${i + 1}. ${pool.name} | fee/aTVL ${feeTvl}% | vol $${vol} | organic ${pool.organic_score ?? "?"}`);
     });
-    return `Top candidates (${candidates.length})\n\n${lines.join("\n")}`;
+  } else {
+    lines.push("Passed: 0 — no candidates available right now.");
   }
-  const examples = (top?.filtered_examples || []).slice(0, 3)
-    .map((entry) => `- ${entry.name}: ${entry.reason}`)
-    .join("\n");
-  return examples
-    ? `No candidates available.\nFiltered examples:\n${examples}`
-    : "No candidates available right now.";
+  return lines.join("\n");
 }
 
 async function deployLatestCandidate(index) {
@@ -1352,8 +1374,8 @@ async function deployLatestCandidate(index) {
     organic_score: candidate.organic_score,
     initial_value_usd: candidate.tvl ?? candidate.active_tvl ?? null,
   });
-  if (result?.success === false || result?.error) {
-    throw new Error(result.error || "Deploy failed");
+  if (result?.blocked || result?.success === false || result?.error) {
+    throw new Error(result?.reason || result?.error || "Deploy failed");
   }
   return { result, candidate, deployAmount, binsBelow };
 }
@@ -1365,6 +1387,390 @@ function appendHistory(userMsg, assistantMsg) {
   if (sessionHistory.length > MAX_HISTORY) {
     sessionHistory.splice(0, sessionHistory.length - MAX_HISTORY);
   }
+}
+
+async function runDeployScreen(chatId, amount, messageId) {
+  try {
+    const screenResult = await runDeterministicScreen(5);
+    const candidates = _latestCandidates;
+
+    if (candidates.length === 0) {
+      if (messageId) {
+        await editMessageWithButtons(`No candidates available.\n${screenResult}`, messageId, [[{ text: "◀️", callback_data: "deploy:back" }, { text: "❌", callback_data: "deploy:cancel" }]]);
+      } else {
+        await sendMessage(`No candidates available.\n${screenResult}`);
+      }
+      _pendingDeployAmount.delete(chatId);
+      return;
+    }
+
+    const keyboard = candidates.map((pool, i) => {
+      const feeTvl = pool.fee_active_tvl_ratio ?? pool.fee_tvl_ratio ?? "?";
+      const vol = pool.volume_window ?? pool.volume_24h ?? "?";
+      return [{
+        text: `${i + 1}. ${pool.name}  |  fee/aTVL ${feeTvl}%  |  vol $${vol}`,
+        callback_data: `deploy:candidate:${i}`,
+      }];
+    });
+    keyboard.push([{ text: "◀️", callback_data: "deploy:back" }, { text: "❌ Cancel", callback_data: "deploy:cancel" }]);
+
+    if (messageId) {
+      await editMessageWithButtons(`✅ ${candidates.length} candidates\nSelect one to deploy ${amount} SOL:`, messageId, keyboard);
+    } else {
+      await sendMessageWithButtons(`✅ ${candidates.length} candidates\nSelect one to deploy ${amount} SOL:`, keyboard);
+    }
+  } catch (e) {
+    const errMsg = `⚠️ Screen failed: ${e.message}`;
+    if (messageId) await editMessage(errMsg, messageId);
+    else await sendMessage(errMsg);
+  }
+}
+
+async function startDeployFlow(chatId, amount, messageId) {
+  _pendingDeployAmount.set(chatId, amount);
+  if (messageId) {
+    await editMessage(`🔍 Screening pools for ${amount} SOL deploy...`, messageId);
+  } else {
+    await sendMessage(`🔍 Screening pools for ${amount} SOL deploy...`);
+  }
+  await runDeployScreen(chatId, amount, messageId);
+}
+
+async function handleDeployCallback(msg) {
+  const data = msg.callbackData || msg.text || "";
+  const parts = data.split(":");
+  const chatId = msg.chat?.id;
+
+  if (parts[1] === "amount") {
+    const amount = parseFloat(parts[2]);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      await answerCallbackQuery(msg.callbackQueryId, "Invalid amount");
+      return;
+    }
+    _pendingDeployAmount.set(chatId, amount);
+    await answerCallbackQuery(msg.callbackQueryId, `Selected ${amount} SOL`);
+    await startDeployFlow(chatId, amount, msg.messageId);
+    return;
+  }
+
+  if (parts[1] === "custom") {
+    await answerCallbackQuery(msg.callbackQueryId, "Type the amount");
+    _pendingCustomAmount.set(chatId, true);
+    await editMessageWithButtons("✏️ Type the amount in SOL (e.g., 0.15):", msg.messageId, [[{ text: "◀️", callback_data: "deploy:back" }, { text: "❌ Cancel", callback_data: "deploy:cancel" }]]);
+    return;
+  }
+
+  if (parts[1] === "back") {
+    await answerCallbackQuery(msg.callbackQueryId);
+    _pendingCustomAmount.delete(chatId);
+    _pendingDeployAmount.delete(chatId);
+    await renderSubMenu("deploy", msg);
+    return;
+  }
+
+  if (parts[1] === "candidate") {
+    const idx = parseInt(parts[2]);
+    const amount = _pendingDeployAmount.get(chatId);
+
+    if (!Number.isFinite(amount)) {
+      await answerCallbackQuery(msg.callbackQueryId, "No amount selected. Start with /deploy");
+      return;
+    }
+
+    const candidate = _latestCandidates[idx];
+    if (!candidate) {
+      await answerCallbackQuery(msg.callbackQueryId, "Invalid candidate. Run /screen first");
+      _pendingDeployAmount.delete(chatId);
+      return;
+    }
+
+    await answerCallbackQuery(msg.callbackQueryId, `Deploying ${amount} SOL...`);
+    await editMessage(`🚀 Deploying ${amount} SOL into ${candidate.name}...`, msg.messageId);
+
+    try {
+      const binsBelow = computeBinsBelow(candidate.volatility);
+      const result = await executeTool("deploy_position", {
+        pool_address: candidate.pool,
+        amount_y: amount,
+        strategy: config.strategy.strategy,
+        bins_below: binsBelow,
+        bins_above: 0,
+        pool_name: candidate.name,
+        base_mint: candidate.base?.mint || candidate.base_mint || null,
+        bin_step: candidate.bin_step,
+        base_fee: candidate.base_fee,
+        volatility: candidate.volatility,
+        fee_tvl_ratio: candidate.fee_active_tvl_ratio ?? candidate.fee_tvl_ratio,
+        organic_score: candidate.organic_score,
+        initial_value_usd: candidate.tvl ?? candidate.active_tvl ?? null,
+      });
+
+      if (result?.blocked || result?.success === false || result?.error) {
+        throw new Error(result?.reason || result?.error || "Deploy failed");
+      }
+
+      const coverage = result.range_coverage
+        ? `Range: ${fmtPct(result.range_coverage.downside_pct)} downside | ${fmtPct(result.range_coverage.upside_pct)} upside`
+        : `Strategy: ${config.strategy.strategy} | binsBelow: ${binsBelow}`;
+
+      await editMessage([
+        `✅ Deployed ${candidate.name}`,
+        `Pool: ${candidate.pool}`,
+        `Amount: ${amount} SOL`,
+        coverage,
+        result.position ? `Position: ${result.position.slice(0, 8)}...` : null,
+        result.txs?.length ? `Tx: ${result.txs[0]}` : null,
+      ].filter(Boolean).join("\n"), msg.messageId);
+    } catch (e) {
+      await editMessage(`❌ Deploy failed: ${e.message}`, msg.messageId);
+    }
+
+    _pendingDeployAmount.delete(chatId);
+    return;
+  }
+
+  if (parts[1] === "cancel") {
+    _pendingDeployAmount.delete(chatId);
+    await answerCallbackQuery(msg.callbackQueryId, "Cancelled");
+    await editMessage("Deploy cancelled.", msg.messageId);
+    return;
+  }
+
+  await answerCallbackQuery(msg.callbackQueryId, "Unknown deploy action");
+}
+
+// ─── Persistent Menu System ──────────────────────────────────────────
+
+function mainMenuText() {
+  return `🤖 Meridian — DLMM LP Agent\nMode: ${process.env.DRY_RUN === "true" ? "🔴 DRY RUN" : "🟢 LIVE"}`;
+}
+
+function mainMenuKeyboard() {
+  return [
+    [
+      { text: "📊 Status", callback_data: "menu:status" },
+      { text: "📍 Positions", callback_data: "menu:positions" },
+    ],
+    [
+      { text: "💰 Deploy", callback_data: "menu:deploy" },
+      { text: "🔍 Screen", callback_data: "menu:screen" },
+    ],
+    [
+      { text: "⚙️ Settings", callback_data: "menu:settings" },
+      { text: "🔔 Notifications", callback_data: "menu:notifications" },
+    ],
+    [
+      { text: "📌 Lainnya", callback_data: "menu:lainnya" },
+      { text: "❓ Help", callback_data: "menu:help" },
+    ],
+    [
+      { text: "❌ Close", callback_data: "menu:close" },
+    ],
+  ];
+}
+
+function backButton(page) {
+  return [{ text: "◀️", callback_data: `menu:${page}` }];
+}
+
+function buildDeployAmountKeyboard(includeBack = false) {
+  const amounts = [0.001, 0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1];
+  const rows = [];
+  for (let i = 0; i < amounts.length; i += 2) {
+    rows.push([
+      { text: `${amounts[i]} SOL`, callback_data: `deploy:amount:${amounts[i]}` },
+      i + 1 < amounts.length ? { text: `${amounts[i + 1]} SOL`, callback_data: `deploy:amount:${amounts[i + 1]}` } : null,
+    ].filter(Boolean));
+  }
+  rows.push([{ text: "✏️ Custom", callback_data: "deploy:custom" }]);
+  if (includeBack) rows.push([{ text: "◀️", callback_data: "menu:main" }, { text: "❌", callback_data: "menu:close" }]);
+  return rows;
+}
+
+async function renderSubMenu(page, msg) {
+  let text, keyboard;
+
+  if (page === "status") {
+    try {
+      const [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
+      const deployAmount = computeDeployAmount(wallet.sol);
+      text = [
+        "📊 Status",
+        `Wallet: ${wallet.sol} SOL ($${wallet.sol_usd})`,
+        `SOL price: $${wallet.sol_price}`,
+        `Open positions: ${positions.total_positions}/${config.risk.maxPositions}`,
+        `Next deploy: ${deployAmount} SOL`,
+        `Mode: ${process.env.DRY_RUN === "true" ? "🔴 DRY RUN" : "🟢 LIVE"}`,
+        `HiveMind: ${isHiveMindEnabled() ? "on" : "off"}`,
+      ].join("\n");
+    } catch (e) {
+      text = `⚠️ Status error: ${e.message}`;
+    }
+    keyboard = [[{ text: "🔄 Refresh", callback_data: "menu:status" }], [{ text: "◀️", callback_data: "menu:main" }, { text: "❌", callback_data: "menu:close" }]];
+  } else if (page === "positions") {
+    try {
+      const { positions, total_positions } = await getMyPositions({ force: true });
+      if (total_positions === 0) {
+        text = "📍 Positions\n\nNo open positions.";
+      } else {
+        const cur = config.management.solMode ? "◎" : "$";
+        const lines = positions.map((p, i) => {
+          const pnl = p.pnl_usd >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
+          const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
+          const oor = !p.in_range ? " ⚠️OOR" : "";
+          return `${i + 1}. ${p.pair} | ${cur}${p.total_value_usd} | PnL: ${pnl} | ${age}${oor}`;
+        });
+        text = `📍 Positions (${total_positions})\n\n${lines.join("\n")}`;
+      }
+    } catch (e) {
+      text = `⚠️ Positions error: ${e.message}`;
+    }
+    keyboard = [[{ text: "◀️", callback_data: "menu:main" }, { text: "❌", callback_data: "menu:close" }]];
+  } else if (page === "deploy") {
+    text = "💰 Deploy\n\nSelect deploy amount:";
+    keyboard = buildDeployAmountKeyboard(true);
+  } else if (page === "screen") {
+    text = "🔍 Screen\n\nScan for new pool candidates or view cached list:";
+    keyboard = [
+      [
+        { text: "🔍 Run Screen", callback_data: "menu:run_screen" },
+        { text: "📋 Candidates", callback_data: "menu:candidates" },
+      ],
+      [{ text: "◀️", callback_data: "menu:main" }, { text: "❌", callback_data: "menu:close" }],
+    ];
+  } else if (page === "notifications") {
+    text = [
+      "🔔 Notifications",
+      "",
+      `Management cycle: ${_notifyManagement ? "✅ ON" : "❌ OFF"}`,
+      `Screening cycle: ${_notifyScreening ? "✅ ON" : "❌ OFF"}`,
+    ].join("\n");
+    keyboard = [
+      [
+        { text: `Mgmt: ${_notifyManagement ? "✅ ON" : "⬜ OFF"}`, callback_data: "notif:toggle:management" },
+        { text: `Screen: ${_notifyScreening ? "✅ ON" : "⬜ OFF"}`, callback_data: "notif:toggle:screening" },
+      ],
+      [{ text: "◀️", callback_data: "menu:main" }, { text: "❌", callback_data: "menu:close" }],
+    ];
+  } else if (page === "settings") {
+    await showSettingsMenu({ messageId: msg?.messageId });
+    return;
+  } else if (page === "help") {
+    text = formatHelpText();
+    keyboard = [[{ text: "◀️", callback_data: "menu:main" }, { text: "❌", callback_data: "menu:close" }]];
+  } else if (page === "lainnya") {
+    text = "📌 Lainnya\n\nOther commands:";
+    keyboard = [
+      [{ text: "📋 Briefing", callback_data: "menu:briefing" }],
+      [{ text: "📊 Thresholds", callback_data: "menu:thresholds" }],
+      [{ text: "⚡ Evolve", callback_data: "menu:evolve" }],
+      [{ text: "◀️", callback_data: "menu:main" }, { text: "❌", callback_data: "menu:close" }],
+    ];
+  } else {
+    text = mainMenuText();
+    keyboard = mainMenuKeyboard();
+  }
+
+  if (msg?.messageId) {
+    await editMessageWithButtons(text, msg.messageId, keyboard);
+  } else {
+    await sendMessageWithButtons(text, keyboard);
+  }
+}
+
+async function handleMenuCallback(msg) {
+  const data = msg.callbackData || msg.text || "";
+  const page = data.split(":").slice(1).join(":");
+
+  if (page === "run_screen") {
+    await answerCallbackQuery(msg.callbackQueryId, "Screening...");
+    await editMessage("🔍 Screening pools...", msg.messageId);
+    try {
+      const result = await runDeterministicScreen(5);
+      await editMessageWithButtons(result, msg.messageId, [
+        [{ text: "🔄 Refresh", callback_data: "menu:screen" }],
+        [backButton("screen")[0], { text: "❌", callback_data: "menu:close" }],
+      ]);
+    } catch (e) {
+      await editMessageWithButtons(`⚠️ Screen failed: ${e.message}`, msg.messageId, [backButton("screen")]);
+    }
+    return;
+  }
+
+  if (page === "candidates") {
+    await answerCallbackQuery(msg.callbackQueryId);
+    const text = describeLatestCandidates(5);
+    await editMessageWithButtons(text, msg.messageId, [
+      [{ text: "🔄 Refresh", callback_data: "menu:candidates" }],
+      [backButton("screen")[0], { text: "❌", callback_data: "menu:close" }],
+    ]);
+    return;
+  }
+
+  // Direct actions from Lainnya submenu — show result inline
+  if (page === "briefing") {
+    await answerCallbackQuery(msg.callbackQueryId);
+    await editMessage("📋 Generating briefing...", msg.messageId);
+    try {
+      const briefing = await generateBriefing();
+      await editHTMLWithButtons(briefing, msg.messageId, [[backButton("lainnya")[0], { text: "❌", callback_data: "menu:close" }]]);
+    } catch (e) {
+      await editMessageWithButtons(`⚠️ Error: ${e.message}`, msg.messageId, [[backButton("lainnya")[0], { text: "❌", callback_data: "menu:close" }]]);
+    }
+    return;
+  }
+  if (page === "thresholds") {
+    await answerCallbackQuery(msg.callbackQueryId);
+    const s = config.screening;
+    const lines = [
+      "📊 Thresholds",
+      `  minFeeActiveTvlRatio: ${s.minFeeActiveTvlRatio}`,
+      `  minOrganic:           ${s.minOrganic}`,
+      `  minHolders:           ${s.minHolders}`,
+      `  minTvl:               ${s.minTvl}`,
+      `  maxTvl:               ${s.maxTvl}`,
+      `  minVolume:            ${s.minVolume}`,
+      `  minTokenFeesSol:      ${s.minTokenFeesSol}`,
+      `  maxBundlePct:         ${s.maxBundlePct}`,
+      `  maxBotHoldersPct:     ${s.maxBotHoldersPct}`,
+      `  maxTop10Pct:          ${s.maxTop10Pct}`,
+      `  timeframe:            ${s.timeframe}`,
+    ];
+    const perf = getPerformanceSummary();
+    if (perf) {
+      lines.push(`  Based on ${perf.total_positions_closed} closed positions`);
+      lines.push(`  Win rate: ${perf.win_rate_pct}%  |  Avg PnL: ${perf.avg_pnl_pct}%`);
+    }
+    await editMessageWithButtons(lines.join("\n"), msg.messageId, [[backButton("lainnya")[0], { text: "❌", callback_data: "menu:close" }]]);
+    return;
+  }
+  if (page === "evolve") {
+    await answerCallbackQuery(msg.callbackQueryId);
+    const perf = getPerformanceSummary();
+    if (!perf || perf.total_positions_closed < 5) {
+      const needed = 5 - (perf?.total_positions_closed || 0);
+      await editMessageWithButtons(`Need at least 5 closed positions to evolve. ${needed} more needed.`, msg.messageId, [[backButton("lainnya")[0], { text: "❌", callback_data: "menu:close" }]]);
+      return;
+    }
+    await editMessage("⚡ Evolving thresholds...", msg.messageId);
+    try {
+      const lessonsData = JSON.parse(readFileSync("./lessons.json", "utf8"));
+      const result = evolveThresholds(lessonsData.performance, config);
+      await editMessageWithButtons(`✅ Evolved: ${JSON.stringify(result?.applied || result)}`, msg.messageId, [[backButton("lainnya")[0], { text: "❌", callback_data: "menu:close" }]]);
+    } catch (e) {
+      await editMessageWithButtons(`⚠️ Evolve error: ${e.message}`, msg.messageId, [[backButton("lainnya")[0], { text: "❌", callback_data: "menu:close" }]]);
+    }
+    return;
+  }
+
+  if (page === "close") {
+    await answerCallbackQuery(msg.callbackQueryId, "Closed");
+    await editMessage("Menu closed.", msg.messageId);
+    return;
+  }
+
+  await answerCallbackQuery(msg.callbackQueryId);
+  await renderSubMenu(page, msg);
 }
 
 function refreshPrompt() {
@@ -1391,32 +1797,75 @@ async function telegramHandler(msg) {
     }
     return;
   }
-  if (text === "/settings" || text === "/menu" || text === "/configmenu") {
+
+  if (msg?.isCallback && text.startsWith("deploy:")) {
+    try {
+      await handleDeployCallback(msg);
+    } catch (e) {
+      await answerCallbackQuery(msg.callbackQueryId, e.message).catch(() => {});
+    }
+    return;
+  }
+
+  if (msg?.isCallback && text.startsWith("menu:")) {
+    try {
+      await handleMenuCallback(msg);
+    } catch (e) {
+      await answerCallbackQuery(msg.callbackQueryId, e.message).catch(() => {});
+    }
+    return;
+  }
+
+  if (msg?.isCallback && text.startsWith("notif:")) {
+    try {
+      const parts = text.split(":");
+      if (parts[2] === "management") {
+        _notifyManagement = !_notifyManagement;
+        await answerCallbackQuery(msg.callbackQueryId, `Mgmt ${_notifyManagement ? "ON" : "OFF"}`);
+      } else if (parts[2] === "screening") {
+        _notifyScreening = !_notifyScreening;
+        await answerCallbackQuery(msg.callbackQueryId, `Screen ${_notifyScreening ? "ON" : "OFF"}`);
+      }
+      saveNotifFlags();
+      await renderSubMenu("notifications", msg);
+    } catch (e) {
+      await answerCallbackQuery(msg.callbackQueryId, e.message).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/start" || text === "/menu") {
+    await sendMessageWithButtons(mainMenuText(), mainMenuKeyboard()).catch(() => {});
+    return;
+  }
+
+  if (text === "/notifications") {
+    await renderSubMenu("notifications", {}).catch(() => {});
+    return;
+  }
+
+  if (text === "/lainnya") {
+    await renderSubMenu("lainnya", {}).catch(() => {});
+    return;
+  }
+
+  if (text === "/settings" || text === "/configmenu") {
     await showSettingsMenu().catch((e) => sendMessage(`Settings error: ${e.message}`).catch(() => {}));
     return;
   }
-  if (_managementBusy || _screeningBusy || busy) {
-    if (_telegramQueue.length < 5) {
-      _telegramQueue.push(msg);
-      sendMessage(`⏳ Queued (${_telegramQueue.length} in queue): "${text.slice(0, 60)}"`).catch(() => {});
-    } else {
-      sendMessage("Queue is full (5 messages). Wait for the agent to finish.").catch(() => {});
-    }
+
+  if (text === "/help") {
+    await sendMessageWithButtons(formatHelpText(), [[{ text: "◀️", callback_data: "menu:main" }, { text: "❌", callback_data: "menu:close" }]]).catch(() => {});
     return;
   }
 
   if (text === "/briefing") {
     try {
       const briefing = await generateBriefing();
-      await sendHTML(briefing);
+      await sendHTMLWithButtons(briefing, [[{ text: "◀️", callback_data: "menu:lainnya" }, { text: "❌", callback_data: "menu:close" }]]);
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
-    return;
-  }
-
-  if (text === "/help") {
-    await sendMessage(formatHelpText()).catch(() => {});
     return;
   }
 
@@ -1426,7 +1875,7 @@ async function telegramHandler(msg) {
       const suffix = text === "/status" && positions.total_positions
         ? `\n\nUse /positions for the numbered list.`
         : "";
-      await sendMessage(`${formatWalletStatus(wallet, positions)}${suffix}`).catch(() => {});
+      await sendMessageWithButtons(`${formatWalletStatus(wallet, positions)}${suffix}`, [[{ text: "◀️", callback_data: "menu:main" }, { text: "❌", callback_data: "menu:close" }]]).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
@@ -1434,14 +1883,57 @@ async function telegramHandler(msg) {
   }
 
   if (text === "/config") {
-    await sendMessage(formatConfigSnapshot()).catch(() => {});
+    await sendMessageWithButtons(formatConfigSnapshot(), [[{ text: "◀️", callback_data: "menu:settings" }, { text: "❌", callback_data: "menu:close" }]]).catch(() => {});
+    return;
+  }
+
+  if (text === "/thresholds") {
+    const s = config.screening;
+    const lines = [
+      "📊 Thresholds",
+      `  minFeeActiveTvlRatio: ${s.minFeeActiveTvlRatio}`,
+      `  minOrganic:           ${s.minOrganic}`,
+      `  minHolders:           ${s.minHolders}`,
+      `  minTvl:               ${s.minTvl}`,
+      `  maxTvl:               ${s.maxTvl}`,
+      `  minVolume:            ${s.minVolume}`,
+      `  minTokenFeesSol:      ${s.minTokenFeesSol}`,
+      `  maxBundlePct:         ${s.maxBundlePct}`,
+      `  maxBotHoldersPct:     ${s.maxBotHoldersPct}`,
+      `  maxTop10Pct:          ${s.maxTop10Pct}`,
+      `  timeframe:            ${s.timeframe}`,
+    ];
+    const perf = getPerformanceSummary();
+    if (perf) {
+      lines.push(`  Based on ${perf.total_positions_closed} closed positions`);
+      lines.push(`  Win rate: ${perf.win_rate_pct}%  |  Avg PnL: ${perf.avg_pnl_pct}%`);
+    }
+    await sendMessageWithButtons(lines.join("\n"), [[{ text: "◀️", callback_data: "menu:lainnya" }, { text: "❌", callback_data: "menu:close" }]]).catch(() => {});
+    return;
+  }
+
+  if (text === "/evolve") {
+    const perf = getPerformanceSummary();
+    if (!perf || perf.total_positions_closed < 5) {
+      const needed = 5 - (perf?.total_positions_closed || 0);
+      await sendMessageWithButtons(`Need at least 5 closed positions to evolve. ${needed} more needed.`, [[{ text: "◀️", callback_data: "menu:lainnya" }, { text: "❌", callback_data: "menu:close" }]]).catch(() => {});
+      return;
+    }
+    await sendMessageWithButtons("⚡ Evolving thresholds...", [[{ text: "◀️", callback_data: "menu:lainnya" }, { text: "❌", callback_data: "menu:close" }]]).catch(() => {});
+    try {
+      const lessonsData = JSON.parse(readFileSync("./lessons.json", "utf8"));
+      const result = evolveThresholds(lessonsData.performance, config);
+      await sendMessageWithButtons(`✅ Evolved: ${JSON.stringify(result?.applied || result)}`, [[{ text: "◀️", callback_data: "menu:lainnya" }, { text: "❌", callback_data: "menu:close" }]]).catch(() => {});
+    } catch (e) {
+      await sendMessageWithButtons(`⚠️ Evolve error: ${e.message}`, [[{ text: "◀️", callback_data: "menu:lainnya" }, { text: "❌", callback_data: "menu:close" }]]).catch(() => {});
+    }
     return;
   }
 
   if (text === "/positions") {
     try {
       const { positions, total_positions } = await getMyPositions({ force: true });
-      if (total_positions === 0) { await sendMessage("No open positions."); return; }
+      if (total_positions === 0) { await sendMessageWithButtons("No open positions.", [[{ text: "◀️", callback_data: "menu:main" }, { text: "❌", callback_data: "menu:close" }]]); return; }
       const cur = config.management.solMode ? "◎" : "$";
       const lines = positions.map((p, i) => {
         const pnl = p.pnl_usd >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
@@ -1449,8 +1941,41 @@ async function telegramHandler(msg) {
         const oor = !p.in_range ? " ⚠️OOR" : "";
         return `${i + 1}. ${p.pair} | ${cur}${p.total_value_usd} | PnL: ${pnl} | fees: ${cur}${p.unclaimed_fees_usd} | ${age}${oor}`;
       });
-      await sendMessage(`📊 Open Positions (${total_positions}):\n\n${lines.join("\n")}\n\n/close <n> to close | /set <n> <note> to set instruction`);
+      await sendMessageWithButtons(`📊 Open Positions (${total_positions}):\n\n${lines.join("\n")}\n\n/close <n> to close | /set <n> <note> to set instruction`, [[{ text: "◀️", callback_data: "menu:main" }, { text: "❌", callback_data: "menu:close" }]]);
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+    return;
+  }
+
+  if (text === "/candidates") {
+    await sendMessageWithButtons(describeLatestCandidates(5), [[{ text: "◀️", callback_data: "menu:screen" }, { text: "❌", callback_data: "menu:close" }]]).catch(() => {});
+    return;
+  }
+
+  // /deploy with no args — show amount selection menu
+  if (text === "/deploy") {
+    await sendMessageWithButtons("💰 Select deploy amount:", buildDeployAmountKeyboard(true));
+    return;
+  }
+
+  const deployMatch = text.match(/^\/deploy\s+(\d+)$/i);
+  if (deployMatch) {
+    try {
+      const idx = parseInt(deployMatch[1]) - 1;
+      const { candidate, result, deployAmount, binsBelow } = await deployLatestCandidate(idx);
+      const coverage = result.range_coverage
+        ? `Range: ${fmtPct(result.range_coverage.downside_pct)} downside | ${fmtPct(result.range_coverage.upside_pct)} upside`
+        : `Strategy: ${config.strategy.strategy} | binsBelow: ${binsBelow}`;
+      await sendMessage([
+        `✅ Deployed ${candidate.name}`,
+        `Pool: ${candidate.pool}`,
+        `Amount: ${deployAmount} SOL`,
+        coverage,
+        `Position: ${result.position || "n/a"}`,
+        result.txs?.length ? `Tx: ${result.txs[0]}` : null,
+      ].filter(Boolean).join("\n")).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
     return;
   }
 
@@ -1525,79 +2050,24 @@ async function telegramHandler(msg) {
       const note = setMatch[2].trim();
       const { positions } = await getMyPositions({ force: true });
       if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
-      const pos = positions[idx];
-      setPositionInstruction(pos.position, note);
-      await sendMessage(`✅ Note set for ${pos.pair}:\n"${note}"`);
+      await setPositionInstruction(positions[idx].position, note);
+      await sendMessage(`✅ Note set on position ${idx + 1} (${positions[idx].pair}): "${note}"`);
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
 
-  const setCfgMatch = text.match(/^\/setcfg\s+([A-Za-z0-9_]+)\s+(.+)$/i);
-  if (setCfgMatch) {
-    try {
-      const key = setCfgMatch[1];
-      const value = parseConfigValue(setCfgMatch[2]);
-      const result = await executeTool("update_config", {
-        changes: { [key]: value },
-        reason: "Telegram slash command /setcfg",
-      });
-      if (!result?.success) {
-        await sendMessage(`Config update failed.\nUnknown: ${(result?.unknown || []).join(", ") || "none"}`).catch(() => {});
-        return;
-      }
-      await sendMessage(`✅ Updated ${key} = ${JSON.stringify(value)}`).catch(() => {});
-    } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => {});
-    }
-    return;
-  }
-
-  if (text === "/screen") {
-    try {
-      await sendMessage(await runDeterministicScreen(5)).catch(() => {});
-    } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => {});
-    }
-    return;
-  }
-
-  if (text === "/candidates") {
-    await sendMessage(describeLatestCandidates(5)).catch(() => {});
-    return;
-  }
-
-  const deployMatch = text.match(/^\/deploy\s+(\d+)$/i);
-  if (deployMatch) {
-    try {
-      const idx = parseInt(deployMatch[1]) - 1;
-      const { candidate, result, deployAmount, binsBelow } = await deployLatestCandidate(idx);
-      const coverage = result.range_coverage
-        ? `Range: ${fmtPct(result.range_coverage.downside_pct)} downside | ${fmtPct(result.range_coverage.upside_pct)} upside`
-        : `Strategy: ${config.strategy.strategy} | binsBelow: ${binsBelow}`;
-      await sendMessage([
-        `✅ Deployed ${candidate.name}`,
-        `Pool: ${candidate.pool}`,
-        `Amount: ${deployAmount} SOL`,
-        coverage,
-        `Position: ${result.position || "n/a"}`,
-        result.txs?.length ? `Tx: ${result.txs[0]}` : null,
-      ].filter(Boolean).join("\n")).catch(() => {});
-    } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => {});
-    }
-    return;
-  }
-
   if (text === "/pause") {
-    stopCronJobs();
-    cronStarted = false;
-    await sendMessage("⏸ Paused autonomous cycles. Telegram control still works. Use /resume to start again.").catch(() => {});
+    if (hasAutonomousCycles()) {
+      stopCronJobs();
+      await sendMessage("⏸️ Autonomous cycles paused. Use /resume to continue.").catch(() => {});
+    } else {
+      await sendMessage("Autonomous cycles are already paused.").catch(() => {});
+    }
     return;
   }
 
   if (text === "/resume") {
-    if (!cronStarted) {
-      cronStarted = true;
+    if (!hasAutonomousCycles()) {
       timers.managementLastRun = Date.now();
       timers.screeningLastRun = Date.now();
       startCronJobs();
@@ -1639,7 +2109,73 @@ async function telegramHandler(msg) {
     return;
   }
 
+  if (text === "/screen") {
+    await renderSubMenu("screen", {}).catch(() => {});
+    return;
+  }
+
+  if (text === "/stop") {
+    await sendMessage("🛑 Shutting down...").catch(() => {});
+    setTimeout(() => process.exit(0), 500);
+    return;
+  }
+  if (_managementBusy || _screeningBusy || busy) {
+    if (_telegramQueue.length < 5) {
+      _telegramQueue.push(msg);
+      sendMessage(`⏳ Queued (${_telegramQueue.length} in queue): "${text.slice(0, 60)}"`).catch(() => {});
+    } else {
+      sendMessage("Queue is full (5 messages). Wait for the agent to finish.").catch(() => {});
+    }
+    return;
+  }
+
+  // Intercept custom deploy amount input
+  if (_pendingCustomAmount.has(msg.chat?.id)) {
+    _pendingCustomAmount.delete(msg.chat?.id);
+    const amount = parseFloat(text);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      await sendMessage("❌ Invalid number. Use /deploy to try again.").catch(() => {});
+      return;
+    }
+    await startDeployFlow(msg.chat.id, amount, null);
+    return;
+  }
+
+  // Intercept custom setting value input
+  if (_pendingCustomSetting.has(msg.chat?.id)) {
+    const key = _pendingCustomSetting.get(msg.chat?.id);
+    _pendingCustomSetting.delete(msg.chat?.id);
+    if (text.toLowerCase() === "/cancel") {
+      await sendMessage("Cancelled.").catch(() => {});
+      return;
+    }
+    const value = parseFloat(text);
+    if (!Number.isFinite(value) || value <= 0) {
+      await sendMessage("❌ Invalid number. Send /cancel to abort.").catch(() => {});
+      return;
+    }
+    if (key === "deployAmountSol" && value < 0.001) {
+      await sendMessage("❌ Minimum deploy amount is 0.001 SOL.").catch(() => {});
+      return;
+    }
+    const result = await executeTool("update_config", {
+      changes: { [key]: value },
+      reason: "Telegram settings custom input",
+    });
+    if (!result?.success) {
+      await sendMessage("❌ Update failed.").catch(() => {});
+    } else {
+      await sendMessage(`✅ ${key} set to ${value}`).catch(() => {});
+    }
+    return;
+  }
+
   busy = true;
+  // Run agent loop in background so polling loop stays responsive
+  runAgentInBackground(text, sessionHistory);
+}
+
+async function runAgentInBackground(text, sessionHistory) {
   let liveMessage = null;
   try {
     log("telegram", `Incoming: ${text}`);

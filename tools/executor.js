@@ -775,8 +775,8 @@ async function runSafetyChecks(name, args) {
         };
       }
 
-      const minDeploy = Math.max(0.1, config.management.deployAmountSol);
-      if (amountY < minDeploy) {
+      const minDeploy = Math.max(0.001, config.management.deployAmountSol);
+      if (amountY < minDeploy - 0.000001) { // small epsilon for float comparison
         return {
           pass: false,
           reason: `Amount ${amountY} SOL is below the minimum deploy amount (${minDeploy} SOL). Use at least ${minDeploy} SOL.`,

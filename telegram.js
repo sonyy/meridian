@@ -136,6 +136,15 @@ export async function sendMessageWithButtons(text, inlineKeyboard) {
   });
 }
 
+export async function sendHTMLWithButtons(html, inlineKeyboard) {
+  if (!TOKEN || !chatId) return;
+  return postTelegram("sendMessage", {
+    text: html.slice(0, 4096),
+    parse_mode: "HTML",
+    reply_markup: { inline_keyboard: inlineKeyboard },
+  });
+}
+
 export async function sendHTML(html) {
   if (!TOKEN || !chatId) return;
   return postTelegram("sendMessage", { text: html.slice(0, 4096), parse_mode: "HTML" });
@@ -154,6 +163,16 @@ export async function editMessageWithButtons(text, messageId, inlineKeyboard) {
   return postTelegram("editMessageText", {
     message_id: messageId,
     text: String(text).slice(0, 4096),
+    reply_markup: { inline_keyboard: inlineKeyboard },
+  });
+}
+
+export async function editHTMLWithButtons(html, messageId, inlineKeyboard) {
+  if (!TOKEN || !chatId || !messageId) return null;
+  return postTelegram("editMessageText", {
+    message_id: messageId,
+    text: html.slice(0, 4096),
+    parse_mode: "HTML",
     reply_markup: { inline_keyboard: inlineKeyboard },
   });
 }
@@ -445,6 +464,42 @@ export async function notifyOutOfRange({ pair, minutesOOR }) {
     `⚠️ <b>Out of Range</b> ${pair}\n` +
     `Been OOR for ${minutesOOR} minutes`
   );
+}
+
+export async function notifyScreeningSummary({
+  totalScreened,
+  filteredExamples = [],
+  additionalFiltered = [],
+  passingCount,
+  finalDecision,
+  deployPoolName = null,
+}) {
+  if (!TOKEN || !chatId) return;
+  if (hasActiveLiveMessage()) return;
+
+  const lines = [`🔍 Screening Summary — ${totalScreened} pools scanned`];
+
+  if (filteredExamples.length > 0) {
+    lines.push(`Filtered (discovery): ${filteredExamples.length} pool(s)`);
+    filteredExamples.slice(0, 5).forEach((f) => lines.push(`  • ${f.name}: ${f.reason}`));
+  }
+
+  if (additionalFiltered.length > 0) {
+    lines.push(`Filtered (additional): ${additionalFiltered.length} pool(s)`);
+    additionalFiltered.slice(0, 5).forEach((f) => lines.push(`  • ${f.name}: ${f.reason}`));
+  }
+
+  lines.push(`Passed all filters: ${passingCount} pool(s)`);
+
+  if (finalDecision === "deploy" && deployPoolName) {
+    lines.push(`Result: ✅ Deployed → ${deployPoolName}`);
+  } else if (finalDecision === "no_deploy") {
+    lines.push("Result: ⛔ No deploy — LLM found no pool worth entering");
+  } else if (finalDecision === "skipped") {
+    lines.push("Result: ⏭️ Skipped — pre-conditions not met");
+  }
+
+  await sendMessage(lines.join("\n"));
 }
 
 function sleep(ms) {
