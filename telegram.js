@@ -518,6 +518,7 @@ export async function notifyScreeningSummary({
   filteredExamples = [],
   additionalFiltered = [],
   passingCount,
+  passingPools = [],
   finalDecision,
   deployPoolName = null,
   skipReason = "",
@@ -537,16 +538,27 @@ export async function notifyScreeningSummary({
     additionalFiltered.slice(0, 5).forEach((f) => lines.push(`  • ${f.name}: ${f.reason}`));
   }
 
-  lines.push(`Passed all filters: ${passingCount} pool(s)`);
+  if (passingCount > 0 && passingPools.length > 0) {
+    lines.push(`Passed all filters: ${passingCount} pool(s)`);
+    passingPools.slice(0, 5).forEach((p) =>
+      lines.push(`  • ${p.name} | fee/aTVL ${p.feeTvl ?? "?"}% | vol $${p.vol ?? "?"} | organic ${p.organic ?? "?"}${p.mcap ? ` | mcap $${p.mcap}` : ""}`)
+    );
+  } else {
+    lines.push(`Passed all filters: ${passingCount} pool(s)`);
+  }
 
-  if (finalDecision === "deploy" && deployPoolName) {
+  if ((finalDecision === "deploy" || finalDecision === "deployed") && deployPoolName) {
+    if (passingCount > 0 && passingPools.length > 0) lines.push("");
     lines.push(`Result: ✅ Deployed → ${deployPoolName}`);
   } else if (llmFailed) {
+    if (passingCount > 0 && passingPools.length > 0) lines.push("");
     lines.push("Result: ⛔ No deploy — LLM review failed. Enable 'Auto-Deploy (no LLM)' in /settings to auto-deploy on failure, or deploy manually via /screen.");
   } else if (finalDecision === "no_deploy") {
+    if (passingCount > 0 && passingPools.length > 0) lines.push("");
     lines.push("Result: ⛔ No deploy — LLM found no pool worth entering");
   } else if (finalDecision === "skipped") {
     const reason = skipReason || "pre-conditions not met";
+    if (passingCount > 0 && passingPools.length > 0) lines.push("");
     lines.push(`Result: ⏭️ Skipped — ${reason}`);
   }
 

@@ -220,6 +220,7 @@ function normalizeConfigValue(key, value) {
     "category",
     "discordSignalMode",
     "strategy",
+    "deployMode",
     "managementModel",
     "screeningModel",
     "generalModel",

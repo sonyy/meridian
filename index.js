@@ -531,6 +531,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
           filteredExamples: earlyFilteredExamples,
           additionalFiltered: filteredOut,
           passingCount: 0,
+          passingPools: [],
           finalDecision: "no_deploy",
         });
       }
@@ -569,6 +570,13 @@ export async function runScreeningCycle({ silent = false } = {}) {
             filteredExamples: earlyFilteredExamples,
             additionalFiltered: filteredOut,
             passingCount: 1,
+            passingPools: [{
+              name: passing[0].pool?.name || "unknown",
+              feeTvl: passing[0].pool?.fee_active_tvl_ratio ?? passing[0].pool?.fee_tvl_ratio,
+              vol: passing[0].pool?.volume_window ?? passing[0].pool?.volume_24h,
+              organic: passing[0].pool?.organic_score,
+              mcap: passing[0].pool?.mcap,
+            }],
             finalDecision: "no_deploy",
           });
         }
@@ -733,6 +741,13 @@ IMPORTANT:
           filteredExamples: earlyFilteredExamples,
           additionalFiltered: filteredOut,
           passingCount: passing.length,
+          passingPools: passing.map(p => ({
+            name: p.pool?.name || "unknown",
+            feeTvl: p.pool?.fee_active_tvl_ratio ?? p.pool?.fee_tvl_ratio,
+            vol: p.pool?.volume_window ?? p.pool?.volume_24h,
+            organic: p.pool?.organic_score,
+            mcap: p.pool?.mcap,
+          })),
           finalDecision: "no_deploy",
         });
       }
@@ -855,7 +870,15 @@ IMPORTANT:
           filteredExamples: earlyFilteredExamples,
           additionalFiltered: filteredOut,
           passingCount: passing.length,
+          passingPools: passing.map(p => ({
+            name: p.pool?.name || "unknown",
+            feeTvl: p.pool?.fee_active_tvl_ratio ?? p.pool?.fee_tvl_ratio,
+            vol: p.pool?.volume_window ?? p.pool?.volume_24h,
+            organic: p.pool?.organic_score,
+            mcap: p.pool?.mcap,
+          })),
           finalDecision: deterministicResult?.success ? "deployed" : "no_deploy",
+          deployPoolName: deterministicResult?.success ? (deterministicResult.pool || "unknown") : null,
           llmFailed,
         });
       }
