@@ -47,7 +47,7 @@ const isMain = entrypointPath
 
 if (isMain) {
   log("startup", "DLMM LP Agent starting...");
-  log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
+  log("startup", `Mode: ${config.runtime.dryRunMode ? "DRY RUN" : "LIVE"}`);
   log("startup", `Model: ${process.env.LLM_MODEL || "hermes-3-405b"}`);
   ensureAgentId();
   bootstrapHiveMind().catch((error) => log("hivemind_warn", `Bootstrap failed: ${error.message}`));
@@ -432,24 +432,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
         reason: `Max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`,
       });
       if (!silent && telegramEnabled() && _notifyScreening) {
-        notifyScreeningSummary({ totalScreened: 0, passingCount: 0, finalDecision: "skipped" });
-      }
-      _screeningBusy = false;
-      return screenReport;
-    }
-    const minRequired = config.management.deployAmountSol + config.management.gasReserve;
-    const isDryRun = process.env.DRY_RUN === "true";
-    if (!isDryRun && preBalance.sol < minRequired) {
-      log("cron", `Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas)`);
-      screenReport = `Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas).`;
-      appendDecision({
-        type: "skip",
-        actor: "SCREENER",
-        summary: "Screening skipped",
-        reason: `Insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired})`,
-      });
-      if (!silent && telegramEnabled() && _notifyScreening) {
-        notifyScreeningSummary({ totalScreened: 0, passingCount: 0, finalDecision: "skipped" });
+        notifyScreeningSummary({ totalScreened: 0, passingCount: 0, finalDecision: "skipped", skipReason: `max positions (${prePositions.total_positions}/${config.risk.maxPositions})` });
       }
       _screeningBusy = false;
       return screenReport;
@@ -677,7 +660,18 @@ export async function runScreeningCycle({ silent = false } = {}) {
       ? `CANDIDATE COMPARISON — best fee_tvl=${bestFeeTvl}%, best vol=$${bestVol}, best organic=${bestOrganic}\nPick the candidate with the best balance of fee_tvl_ratio, volume, and bin_step suited to its volatility.\n`
       : "";
 
-    const { content } = await agentLoop(`
+    // Try LLM-based screening first (for deploy decisions)
+    // If LLM fails (e.g. insufficient balance), fall back to deterministic candidate display
+    let llmFailed = false;
+    let llmError = "";
+    // "deterministic" mode = skip LLM entirely, go straight to scoring + deploy
+    if (config.screening.deployMode === "deterministic" && passing.length > 0) {
+      log("cron", "LLM review skipped — deployMode=deterministic");
+      llmFailed = true;
+      llmError = "LLM review skipped (deployMode: deterministic)";
+    }
+    try {
+      const { content } = await agentLoop(`
 SCREENING CYCLE
 ${strategyBlock}
 Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL
@@ -693,62 +687,10 @@ STEPS:
    pass deploy_position.volatility = the candidate volatility value.
    For single-side SOL deploys, do not invent upside:
    set amount_y only, keep amount_x = 0, keep bins_above = 0, and let the upper bin stay at the active bin.
-4. Report in this exact format (no tables, no extra sections):
-   🚀 DEPLOYED
-
-   <pool name>
-   <pool address>
-
-   ◎ <deploy amount> SOL | <strategy> | bin <active_bin>
-   Range: <minPrice> → <maxPrice>
-   Range cover: <downside %> downside | <upside %> upside | <total width %> total
-
-   IMPORTANT:
-   - Do NOT calculate the range percentages yourself.
-   - Use the actual deploy_position tool result:
-     range_coverage.downside_pct
-     range_coverage.upside_pct
-     range_coverage.width_pct
-
-   MARKET
-   Fee/TVL: <x>%
-   Volume: $<x>
-   TVL: $<x>
-   Volatility: <x>
-   Organic: <x>
-   Mcap: $<x>
-   Age: <x>h
-
-   AUDIT
-   Top10: <x>%
-   Bots: <x>%
-   Fees paid: <x> SOL
-   Smart wallets: <names or none>
-
-   RISK
-   <If OKX advanced/risk data exists, list only the fields that actually exist: Risk level, Bundle, Sniper, Suspicious, ATH distance, Rugpull, Wash.>
-   <If only rugpull/wash exist, list just those.>
-   <If OKX enrichment is missing, write exactly: OKX: unavailable>
-
-   WHY THIS WON
-   <2-4 concise sentences on why this pool won, key risks, and why it still beat the alternatives>
-5. If no pool qualifies, report in this exact format instead:
-   ⛔ NO DEPLOY
-
-   Cycle finished with no valid entry.
-
-   BEST LOOKING CANDIDATE
-   <name or none>
-
-   WHY SKIPPED
-   <2-4 concise sentences explaining why nothing was good enough>
-
-   REJECTED
-   <short flat list of top candidate names and why they were skipped>
+4. Report in final format (🚀 DEPLOYED or ⛔ NO DEPLOY)
 IMPORTANT:
-- Never write "unknown" for OKX. Use real values, omit missing fields, or write exactly "OKX: unavailable".
 - Keep the whole report compact and highly scannable for Telegram.
-      `, config.llm.maxSteps, [], "SCREENER", config.llm.screeningModel, 2048, {
+      `, Math.min(config.llm.maxSteps, 3), [], "SCREENER", config.llm.screeningModel, 1024, { // max 3 steps for auto — fail fast
         onToolStart: async ({ name }) => {
           if (name === "deploy_position") deployAttempted = true;
           await liveMessage?.toolStart(name);
@@ -761,35 +703,164 @@ IMPORTANT:
           await liveMessage?.toolFinish(name, result, success);
         },
       });
-    screenReport = content;
-    const isNoDeploy = /⛔\s*NO DEPLOY/i.test(content);
-    if (isNoDeploy) {
-      appendDecision({
-        type: "no_deploy",
-        actor: "SCREENER",
-        summary: "LLM chose no deploy",
-        reason: stripThink(content).slice(0, 500),
-      });
-    } else if (!deploySucceeded) {
-      appendDecision({
-        type: "no_deploy",
-        actor: "SCREENER",
-        summary: deployAttempted ? "Deploy attempt did not succeed" : "No successful deploy in screening cycle",
-        reason: stripThink(content).slice(0, 500),
-      });
+      screenReport = content;
+
+      // Treat max-steps / API error / no-tool responses as LLM failures
+      // agentLoop returns content instead of throwing on these conditions
+      if (/max steps reached/i.test(content) || /couldn.*complete|429|insufficient balance|rate limit/i.test(content)) {
+        throw new Error(stripThink(content).slice(0, 200));
+      }
+
+      const isNoDeploy = /⛔\s*NO DEPLOY/i.test(content);
+      if (isNoDeploy) {
+        appendDecision({
+          type: "no_deploy",
+          actor: "SCREENER",
+          summary: "LLM chose no deploy",
+          reason: stripThink(content).slice(0, 500),
+        });
+      } else if (!deploySucceeded) {
+        appendDecision({
+          type: "no_deploy",
+          actor: "SCREENER",
+          summary: deployAttempted ? "Deploy attempt did not succeed" : "No successful deploy in screening cycle",
+          reason: stripThink(content).slice(0, 500),
+        });
+      }
+      if (!silent && telegramEnabled() && _notifyScreening && (isNoDeploy || !deploySucceeded)) {
+        notifyScreeningSummary({
+          totalScreened: topCandidates?.total_screened ?? candidates.length,
+          filteredExamples: earlyFilteredExamples,
+          additionalFiltered: filteredOut,
+          passingCount: passing.length,
+          finalDecision: "no_deploy",
+        });
+      }
+    } catch (err) {
+      // LLM failed — fall back to deterministic candidate display
+      llmFailed = true;
+      llmError = err?.message || String(err);
+      log("cron", `LLM screening failed (${llmError.slice(0, 80)}) — falling back to deterministic`);
     }
-    if (!silent && telegramEnabled() && _notifyScreening && (isNoDeploy || !deploySucceeded)) {
-      notifyScreeningSummary({
-        totalScreened: topCandidates?.total_screened ?? candidates.length,
-        filteredExamples: earlyFilteredExamples,
-        additionalFiltered: filteredOut,
-        passingCount: passing.length,
-        finalDecision: "no_deploy",
-      });
+
+    if (llmFailed || !screenReport) {
+      const candidateList = passing.map(p => {
+        const pool = p.pool;
+        return `  • ${pool.name} | fee/aTVL ${pool.fee_active_tvl_ratio ?? pool.fee_tvl_ratio ?? "?"}% | vol $${pool.volume_window ?? pool.volume_24h ?? "?"} | organic ${pool.organic_score ?? "?"} | mcap $${pool.mcap ?? "?"}`;
+      }).join("\n");
+      const filteredList = filteredOut.length > 0
+        ? "\nFiltered:\n" + filteredOut.map(f => `  • ${f.name}: ${f.reason}`).join("\n")
+        : "";
+      const llmNote = llmFailed
+        ? config.screening.deployMode !== "off"
+          ? "⚠️ LLM review failed — auto-deploying to best-scoring candidate (if available)"
+          : "⚠️ LLM review failed. Set Deploy Mode to 'LLM → Fallback' or 'Deploy tanpa LLM review' in /settings for automatic deploy, or deploy manually via /screen."
+        : `To deploy manually: use Telegram /screen then /deploy <index>`;
+
+      // ── Deterministic auto-deploy (when LLM fails + deployMode allows) ──
+      let deterministicResult = null;
+      if (llmFailed && config.screening.deployMode !== "off" && passing.length > 0) {
+        try {
+          // Score each candidate by weighted metrics
+          const maxFeeTvl = Math.max(...passing.map(p => p.pool.fee_active_tvl_ratio ?? p.pool.fee_tvl_ratio ?? 0));
+          const maxVol = Math.max(...passing.map(p => p.pool.volume_window ?? p.pool.volume_24h ?? 0));
+          const maxOrganic = Math.max(...passing.map(p => p.pool.organic_score ?? 0));
+          const scored = passing.map(p => {
+            const feeTvl = p.pool.fee_active_tvl_ratio ?? p.pool.fee_tvl_ratio ?? 0;
+            const vol = p.pool.volume_window ?? p.pool.volume_24h ?? 0;
+            const organic = p.pool.organic_score ?? 0;
+            const swBonus = (p.sw?.in_pool?.length ?? 0) > 0 ? 0.15 : 0;
+            const score = (
+              (maxFeeTvl > 0 ? (feeTvl / maxFeeTvl) * 0.4 : 0) +
+              (maxVol > 0 ? (vol / maxVol) * 0.3 : 0) +
+              (maxOrganic > 0 ? (organic / maxOrganic) * 0.3 : 0) +
+              swBonus
+            );
+            return { candidate: p, score };
+          });
+          scored.sort((a, b) => b.score - a.score);
+          const best = scored[0].candidate;
+          const pool = best.pool;
+
+          // Fetch active bin and deploy
+          const activeBinResult = await getActiveBin({ pool_address: pool.pool }).catch(() => null);
+          const deployAmount = computeDeployAmount((await getWalletBalances()).sol);
+          const binsBelow = Math.round(
+            config.strategy.minBinsBelow +
+            (pool.volatility ?? 0) / 5 *
+            (config.strategy.maxBinsBelow - config.strategy.minBinsBelow)
+          );
+          const binsBelowClamped = Math.max(config.strategy.minBinsBelow, Math.min(config.strategy.maxBinsBelow, binsBelow));
+
+          const result = await executeTool("deploy_position", {
+            pool_address: pool.pool,
+            amount_y: deployAmount,
+            strategy: config.strategy.strategy,
+            bins_below: binsBelowClamped,
+            bins_above: 0,
+            pool_name: pool.name,
+            base_mint: pool.base?.mint || pool.base_mint || null,
+            bin_step: pool.bin_step,
+            base_fee: pool.base_fee,
+            volatility: pool.volatility,
+            fee_tvl_ratio: pool.fee_active_tvl_ratio ?? pool.fee_tvl_ratio,
+            organic_score: pool.organic_score,
+            initial_value_usd: pool.tvl ?? pool.active_tvl ?? null,
+          });
+          deterministicResult = { success: true, pool: pool.name, address: pool.pool, result };
+          log("cron", `Deterministic deploy: ${pool.name} — ${deployAmount} SOL`);
+        } catch (e) {
+          deterministicResult = { success: false, pool: null, error: e.message };
+          log("cron_error", `Deterministic deploy failed: ${e.message}`);
+        }
+      }
+
+      screenReport = [
+        `🔍 Screening Cycle — ${topCandidates?.total_screened ?? candidates.length} pools scanned, ${passing.length} passed`,
+        filteredList,
+        "",
+        deterministicResult
+          ? deterministicResult.success
+            ? [`✅ DETERMINISTIC DEPLOY`,
+               `Pool: ${deterministicResult.pool}`,
+               `Amount: ${config.management.deployAmountSol} SOL`,
+               `Strategy: ${config.strategy.strategy}`,
+               `Result: ${deterministicResult.result?.signature ? `TX: ${deterministicResult.result.signature}` : "Deployed successfully (dry run)"}`,
+              ].join("\n")
+            : [`⛔ DETERMINISTIC DEPLOY FAILED`,
+               `Error: ${deterministicResult.error}`,
+              ].join("\n")
+          : `Candidates:\n${candidateList}\n\n⛔ NO DEPLOY\n${llmNote}`,
+      ].filter(Boolean).join("\n");
+      if (deterministicResult?.success) {
+        appendDecision({
+          type: "deploy",
+          actor: "SCREENER_DETERMINISTIC",
+          summary: `Deterministic deploy to ${deterministicResult.pool}`,
+          reason: "LLM unavailable — auto-deployed to best-scoring candidate by metrics",
+          pool: deterministicResult.address,
+          pool_name: deterministicResult.pool,
+        });
+      } else {
+        appendDecision({
+          type: "no_deploy",
+          actor: "SCREENER",
+          summary: llmFailed ? "LLM unavailable — deterministic fallback" : "Deterministic (no LLM configured)",
+          reason: deterministicResult ? `Deterministic deploy failed: ${deterministicResult.error}` : (llmFailed ? `LLM API error: ${llmError.slice(0, 200) || "unknown"}` : "No LLM API key set"),
+        });
+      }
+      if (!silent && telegramEnabled() && _notifyScreening) {
+        notifyScreeningSummary({
+          totalScreened: topCandidates?.total_screened ?? candidates.length,
+          filteredExamples: earlyFilteredExamples,
+          additionalFiltered: filteredOut,
+          passingCount: passing.length,
+          finalDecision: deterministicResult?.success ? "deployed" : "no_deploy",
+          llmFailed,
+        });
+      }
     }
-  } catch (error) {
-    log("cron_error", `Screening cycle failed: ${error.message}`);
-    screenReport = `Screening cycle failed: ${error.message}`;
+    _screeningBusy = false;
   } finally {
     _screeningBusy = false;
     if (!silent && telegramEnabled() && _notifyScreening) {
@@ -1060,7 +1131,7 @@ function formatWalletStatus(wallet, positions) {
     `SOL price: $${wallet.sol_price}`,
     `Open positions: ${positions.total_positions}/${config.risk.maxPositions}`,
     `Next deploy amount: ${deployAmount} SOL`,
-    `Dry run: ${process.env.DRY_RUN === "true" ? "yes" : "no"}`,
+    `Dry run: ${config.runtime.dryRunMode ? "yes" : "no"}`,
     `HiveMind: ${hive}`,
   ].join("\n");
 }
@@ -1076,8 +1147,9 @@ function formatConfigSnapshot() {
     `OOR: ${config.management.outOfRangeWaitMinutes}m | cooldown ${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h`,
     `Repeat deploy cooldown: ${config.management.repeatDeployCooldownEnabled ? "on" : "off"} | ${config.management.repeatDeployCooldownTriggerCount}x / ${config.management.repeatDeployCooldownHours}h | min fee earned ${config.management.repeatDeployCooldownMinFeeEarnedPct}% | ${config.management.repeatDeployCooldownScope}`,
     `Yield floor: ${config.management.minFeePerTvl24h}% | min age ${config.management.minAgeBeforeYieldCheck}m`,
-    `Screening: ${config.screening.category} / ${config.screening.timeframe} | TVL ${config.screening.minTvl}-${config.screening.maxTvl}`,
+    `Screening: ${config.screening.category} / ${config.screening.timeframe} | TVL ${config.screening.minTvl}-${config.screening.maxTvl} | ATH filter: ${config.screening.athFilterPct ?? "off"}%`,
     `Intervals: manage ${config.schedule.managementIntervalMin}m | screen ${config.schedule.screeningIntervalMin}m`,
+    `Indicators: ${config.indicators.enabled ? config.indicators.entryPreset : "off"} | requireAll: ${config.indicators.requireAllIntervals} | intervals: ${(config.indicators.intervals || []).join(", ")}`,
     `HiveMind: ${isHiveMindEnabled() ? "enabled" : "disabled"}${config.hiveMind.agentId ? ` | ${config.hiveMind.agentId}` : ""}`,
   ].join("\n");
 }
@@ -1141,6 +1213,8 @@ function settingValue(key) {
     rsiLength: config.indicators.rsiLength,
     indicatorIntervals: config.indicators.intervals,
     requireAllIntervals: config.indicators.requireAllIntervals,
+    deployMode: config.screening.deployMode,
+    dryRunMode: config.runtime.dryRunMode,
   };
   return values[key];
 }
@@ -1157,6 +1231,13 @@ const SETTINGS_MENUS = {
   stopLossPct: { label: "📉 SL %", unit: "%", presets: [5, 10, 15, 20, 25, 30], current: () => `${config.management.stopLossPct}%` },
   managementIntervalMin: { label: "⏱ Manage Interval", unit: "m", presets: [1, 3, 5, 10, 15], current: () => `${config.schedule.managementIntervalMin}m` },
   screeningIntervalMin: { label: "⏱ Screen Interval", unit: "m", presets: [10, 15, 30, 60], current: () => `${config.schedule.screeningIntervalMin}m` },
+  athFilterPct: { label: "📉 ATH Filter", unit: "%", presets: [-40, -30, -25, -20, -15, -10, 0], current: () => `${config.screening.athFilterPct ?? "off"}%` },
+  indicatorEntryPreset: { label: "📊 Entry Indicator", unit: "", presets: ["supertrend_break", "supertrend_or_rsi", "rsi_plus_supertrend", "rsi_reversal", "bollinger_reversion", "off"], current: () => config.indicators.enabled ? config.indicators.entryPreset : "off" },
+  chartIndicatorsEnabled: { label: "📊 Chart Indicators", unit: "", presets: [true, false], current: () => config.indicators.enabled ? "✅ on" : "⬜ off" },
+  requireAllIntervals: { label: "🔧 Require All Intervals", unit: "", presets: [true, false], current: () => config.indicators.requireAllIntervals ? "✅ on" : "⬜ off" },
+  indicatorIntervals: { label: "⏱ Indicator Interval(s)", unit: "", presets: ["5_MINUTE", "15_MINUTE", "both"], current: () => { const v = config.indicators.intervals; return Array.isArray(v) && v.length > 1 ? "5m + 15m" : (v[0] || "5_MINUTE"); } },
+  deployMode: { label: "🤖 Deploy Mode", unit: "", presets: ["off", "llm_fallback", "deterministic"], current: () => { const m = config.screening.deployMode; return m === "llm_fallback" ? "LLM → Fallback" : m === "deterministic" ? "Deploy tanpa LLM review" : "off"; } },
+  dryRunMode: { label: "🧪 Dry Run / Live", unit: "", presets: [true, false], current: () => config.runtime.dryRunMode ? "🔴 DRY RUN" : "🟢 LIVE" },
 };
 
 function renderSettingsMenu() {
@@ -1179,6 +1260,85 @@ function renderSettingsSubmenu(key) {
       keyboard: [
         [settingButton(current === "spot" ? "• spot" : "  spot", "cfg:set:strategy:spot")],
         [settingButton(current === "bid_ask" ? "• bid_ask" : "  bid_ask", "cfg:set:strategy:bid_ask")],
+        [{ text: "◀️", callback_data: "cfg:back" }, { text: "❌", callback_data: "cfg:close" }],
+      ],
+    };
+  }
+
+  if (key === "indicatorEntryPreset") {
+    const current = config.indicators.enabled ? config.indicators.entryPreset : "off";
+    return {
+      text: `📊 Entry Indicator\n\nCurrent: ${current}\n- supertrend_break: requires Supertrend flip bullish\n- supertrend_or_rsi: Supertrend bullish OR RSI oversold\n- rsi_plus_supertrend: RSI oversold + bullish Supertrend\n- rsi_reversal: RSI oversold only\n- bollinger_reversion: Close <= lower band\n- off: no indicator check`,
+      keyboard: [
+        [settingButton(current === "supertrend_break" ? "• supertrend_break" : "  supertrend_break", "cfg:set:indicatorEntryPreset:supertrend_break")],
+        [settingButton(current === "supertrend_or_rsi" ? "• supertrend_or_rsi" : "  supertrend_or_rsi", "cfg:set:indicatorEntryPreset:supertrend_or_rsi")],
+        [settingButton(current === "rsi_plus_supertrend" ? "• rsi_plus_supertrend" : "  rsi_plus_supertrend", "cfg:set:indicatorEntryPreset:rsi_plus_supertrend")],
+        [settingButton(current === "rsi_reversal" ? "• rsi_reversal" : "  rsi_reversal", "cfg:set:indicatorEntryPreset:rsi_reversal")],
+        [settingButton(current === "bollinger_reversion" ? "• bollinger_reversion" : "  bollinger_reversion", "cfg:set:indicatorEntryPreset:bollinger_reversion")],
+        [settingButton(current === "off" ? "• off" : "  off", "cfg:set:indicatorEntryPreset:off")],
+        [{ text: "◀️", callback_data: "cfg:back" }, { text: "❌", callback_data: "cfg:close" }],
+      ],
+    };
+  }
+
+  if (key === "chartIndicatorsEnabled") {
+    const current = config.indicators.enabled;
+    return {
+      text: `📊 Chart Indicators\n\nCurrent: ${current ? "✅ on" : "⬜ off"}\n\nTurning on uses your entryPreset + intervals to filter candidates.\nTurning off skips all indicator checks.`,
+      keyboard: [
+        [settingButton(current ? "✅ on" : "  on", "cfg:set:chartIndicatorsEnabled:true")],
+        [settingButton(!current ? "⬜ off" : "  off", "cfg:set:chartIndicatorsEnabled:false")],
+        [{ text: "◀️", callback_data: "cfg:back" }, { text: "❌", callback_data: "cfg:close" }],
+      ],
+    };
+  }
+
+  if (key === "requireAllIntervals") {
+    const current = config.indicators.requireAllIntervals;
+    return {
+      text: `🔧 Require All Intervals\n\nCurrent: ${current ? "✅ on" : "⬜ off"}\n\nWhen ON: all indicator intervals must confirm before a pool passes.\nWhen OFF: any one interval confirming is enough.\n\nOnly relevant if you have multiple intervals set (e.g. 5_MINUTE + 15_MINUTE).`,
+      keyboard: [
+        [settingButton(current ? "✅ on" : "  on", "cfg:set:requireAllIntervals:true")],
+        [settingButton(!current ? "⬜ off" : "  off", "cfg:set:requireAllIntervals:false")],
+        [{ text: "◀️", callback_data: "cfg:back" }, { text: "❌", callback_data: "cfg:close" }],
+      ],
+    };
+  }
+
+  if (key === "indicatorIntervals") {
+    const current = config.indicators.intervals || ["5_MINUTE"];
+    const isBoth = Array.isArray(current) && current.length > 1;
+    return {
+      text: `⏱ Indicator Interval(s)\n\nCurrent: ${isBoth ? "5m + 15m (both)" : current[0]}\n\nChoose interval(s) for indicator evaluation:`,
+      keyboard: [
+        [settingButton(!isBoth && current[0] === "5_MINUTE" ? "• 5_MINUTE" : "  5_MINUTE", "cfg:set:indicatorIntervals:5_MINUTE")],
+        [settingButton(!isBoth && current[0] === "15_MINUTE" ? "• 15_MINUTE" : "  15_MINUTE", "cfg:set:indicatorIntervals:15_MINUTE")],
+        [settingButton(isBoth ? "• both (5m + 15m)" : "  both (5m + 15m)", "cfg:set:indicatorIntervals:both")],
+        [{ text: "◀️", callback_data: "cfg:back" }, { text: "❌", callback_data: "cfg:close" }],
+      ],
+    };
+  }
+
+  if (key === "deployMode") {
+    const current = config.screening.deployMode;
+    return {
+      text: `🤖 Deploy Mode\n\nCurrent: ${current === "llm_fallback" ? "LLM → Fallback" : current === "deterministic" ? "Deploy tanpa LLM review" : "off"}\n\noff — LLM reviews candidates. If LLM fails, no deploy.\nLLM → Fallback — LLM reviews first. If LLM fails, auto-deploy to best-scoring candidate.\nDeploy tanpa LLM review — Skip LLM entirely, langsung scoring + deploy ke kandidat terbaik.`,
+      keyboard: [
+        [settingButton(current === "off" ? "• off" : "  off", "cfg:set:deployMode:off")],
+        [settingButton(current === "llm_fallback" ? "• LLM → Fallback" : "  LLM → Fallback", "cfg:set:deployMode:llm_fallback")],
+        [settingButton(current === "deterministic" ? "• Deploy tanpa LLM review" : "  Deploy tanpa LLM review", "cfg:set:deployMode:deterministic")],
+        [{ text: "◀️", callback_data: "cfg:back" }, { text: "❌", callback_data: "cfg:close" }],
+      ],
+    };
+  }
+
+  if (key === "dryRunMode") {
+    const current = config.runtime.dryRunMode;
+    return {
+      text: `🧪 Runtime Mode\n\nCurrent: ${current ? "🔴 DRY RUN" : "🟢 LIVE"}\n\nDRY RUN: all on-chain transactions are skipped. Positions are evaluated but not opened/closed. Safe for testing.\nLIVE: real transactions execute. Funds are at risk.\n\nChanges take effect immediately — no restart needed.`,
+      keyboard: [
+        [settingButton(current ? "• 🔴 DRY RUN" : "  🔴 DRY RUN", "cfg:set:dryRunMode:true")],
+        [settingButton(!current ? "• 🟢 LIVE" : "  🟢 LIVE", "cfg:set:dryRunMode:false")],
         [{ text: "◀️", callback_data: "cfg:back" }, { text: "❌", callback_data: "cfg:close" }],
       ],
     };
@@ -1285,8 +1445,19 @@ async function applySettingsMenuCallback(msg) {
     const rawValue = parts.slice(3).join(":");
     const value = normalizeMenuValue(key, rawValue);
     const oldVal = settingValue(key);
+
+    // If "off" is selected from indicatorEntryPreset, also disable chart indicators
+    const changes = { [key]: value };
+    if (key === "indicatorEntryPreset" && rawValue === "off") {
+      changes.chartIndicatorsEnabled = false;
+    }
+    // If turning chart indicators on, restore a default preset if current one is "off"
+    if (key === "chartIndicatorsEnabled" && value === true && settingValue("indicatorEntryPreset") === "off") {
+      changes.indicatorEntryPreset = "supertrend_break";
+    }
+
     const result = await executeTool("update_config", {
-      changes: { [key]: value },
+      changes,
       reason: "Telegram settings menu",
     });
     if (!result?.success) {
@@ -1589,7 +1760,7 @@ async function handleDeployCallback(msg) {
 // ─── Persistent Menu System ──────────────────────────────────────────
 
 function mainMenuText() {
-  return `🤖 Meridian — DLMM LP Agent\nMode: ${process.env.DRY_RUN === "true" ? "🔴 DRY RUN" : "🟢 LIVE"}`;
+  return `🤖 Meridian — DLMM LP Agent\nMode: ${config.runtime.dryRunMode ? "🔴 DRY RUN" : "🟢 LIVE"}`;
 }
 
 function mainMenuKeyboard() {
@@ -1599,11 +1770,11 @@ function mainMenuKeyboard() {
       { text: "📍 Positions", callback_data: "menu:positions" },
     ],
     [
-      { text: "💰 Deploy", callback_data: "menu:deploy" },
       { text: "🔍 Screen", callback_data: "menu:screen" },
+      { text: "⚙️ Settings", callback_data: "menu:settings" },
     ],
     [
-      { text: "⚙️ Settings", callback_data: "menu:settings" },
+      { text: "💰 Deploy", callback_data: "menu:deploy" },
       { text: "🔔 Notifications", callback_data: "menu:notifications" },
     ],
     [
@@ -1647,7 +1818,7 @@ async function renderSubMenu(page, msg) {
         `SOL price: $${wallet.sol_price}`,
         `Open positions: ${positions.total_positions}/${config.risk.maxPositions}`,
         `Next deploy: ${deployAmount} SOL`,
-        `Mode: ${process.env.DRY_RUN === "true" ? "🔴 DRY RUN" : "🟢 LIVE"}`,
+        `Mode: ${config.runtime.dryRunMode ? "🔴 DRY RUN" : "🟢 LIVE"}`,
         `HiveMind: ${isHiveMindEnabled() ? "on" : "off"}`,
       ].join("\n");
     } catch (e) {
@@ -1781,6 +1952,7 @@ async function handleMenuCallback(msg) {
       `  maxBundlePct:         ${s.maxBundlePct}`,
       `  maxBotHoldersPct:     ${s.maxBotHoldersPct}`,
       `  maxTop10Pct:          ${s.maxTop10Pct}`,
+      `  athFilterPct:         ${s.athFilterPct ?? "off"}%`,
       `  timeframe:            ${s.timeframe}`,
     ];
     const perf = getPerformanceSummary();
@@ -1948,6 +2120,7 @@ async function telegramHandler(msg) {
       `  maxBundlePct:         ${s.maxBundlePct}`,
       `  maxBotHoldersPct:     ${s.maxBotHoldersPct}`,
       `  maxTop10Pct:          ${s.maxTop10Pct}`,
+      `  athFilterPct:         ${s.athFilterPct ?? "off"}%`,
       `  timeframe:            ${s.timeframe}`,
     ];
     const perf = getPerformanceSummary();
@@ -2487,6 +2660,7 @@ Commands:
       console.log(`  maxBundlePct:         ${s.maxBundlePct}`);
       console.log(`  maxBotHoldersPct:     ${s.maxBotHoldersPct}`);
       console.log(`  maxTop10Pct:          ${s.maxTop10Pct}`);
+      console.log(`  athFilterPct:         ${s.athFilterPct ?? "off"}%`);
       console.log(`  timeframe:            ${s.timeframe}`);
       const perf = getPerformanceSummary();
       if (perf) {
@@ -2496,6 +2670,19 @@ Commands:
         console.log("\n  No closed positions yet — thresholds are preset defaults.");
       }
       console.log();
+      rl.prompt();
+      return;
+    }
+
+    if (input === "/config" || input === "/settings") {
+      console.log(`\nConfig snapshot:
+  Strategy: ${config.strategy.strategy} | binsBelow: ${config.strategy.minBinsBelow}-${config.strategy.maxBinsBelow}
+  Deploy: ${config.management.deployAmountSol} SOL | maxPositions: ${config.risk.maxPositions}
+  Stop loss: ${config.management.stopLossPct}% | take profit: ${config.management.takeProfitPct}%
+  OOR: ${config.management.outOfRangeWaitMinutes}m | cooldown ${config.management.oorCooldownTriggerCount}x
+  Screening: ${config.screening.category} / ${config.screening.timeframe} | TVL ${config.screening.minTvl}-${config.screening.maxTvl} | ATH filter: ${config.screening.athFilterPct ?? "off"}%
+  Indicators: ${config.indicators.enabled ? config.indicators.entryPreset : "off"} | intervals: ${(config.indicators.intervals || []).join(", ")} | requireAll: ${config.indicators.requireAllIntervals}
+  Manage: ${config.schedule.managementIntervalMin}m | Screen: ${config.schedule.screeningIntervalMin}m\n`);
       rl.prompt();
       return;
     }
