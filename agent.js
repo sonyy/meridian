@@ -383,6 +383,11 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
 
       // If it's a rate limit, wait and retry
       if (error.status === 429) {
+        // Insufficient balance is permanent — don't waste retries
+        if (/insufficient balance/i.test(error.message)) {
+          log("agent", `LLM account exhausted (${error.message.slice(0, 60)}) — aborting`);
+          throw error;
+        }
         log("agent", "Rate limited, waiting 30s...");
         await sleep(30000);
         continue;

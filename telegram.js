@@ -326,9 +326,11 @@ export async function createLiveMessage(title, intro = "Starting...") {
 
   return {
     async toolStart(name) {
-      await upsertToolLine(name, "ℹ️", "...");
+      if (name === "deploy_position") return; // don't show in live message — notifyDeploy handles it separately
+      await upsertToolLine(name, "⏳", "...");
     },
     async toolFinish(name, result, success) {
+      if (name === "deploy_position") return; // don't update — notifyDeploy sends separate notification
       const icon = success ? "✅" : "❌";
       const summary = summarizeToolResult(name, result);
       await upsertToolLine(name, icon, summary ? `— ${summary}` : "");
@@ -518,6 +520,8 @@ export async function notifyScreeningSummary({
   passingCount,
   finalDecision,
   deployPoolName = null,
+  skipReason = "",
+  llmFailed = false,
 }) {
   if (!TOKEN || !chatId) return;
 
@@ -537,10 +541,13 @@ export async function notifyScreeningSummary({
 
   if (finalDecision === "deploy" && deployPoolName) {
     lines.push(`Result: ✅ Deployed → ${deployPoolName}`);
+  } else if (llmFailed) {
+    lines.push("Result: ⛔ No deploy — LLM review failed. Enable 'Auto-Deploy (no LLM)' in /settings to auto-deploy on failure, or deploy manually via /screen.");
   } else if (finalDecision === "no_deploy") {
     lines.push("Result: ⛔ No deploy — LLM found no pool worth entering");
   } else if (finalDecision === "skipped") {
-    lines.push("Result: ⏭️ Skipped — pre-conditions not met");
+    const reason = skipReason || "pre-conditions not met";
+    lines.push(`Result: ⏭️ Skipped — ${reason}`);
   }
 
   await sendMessage(lines.join("\n"));

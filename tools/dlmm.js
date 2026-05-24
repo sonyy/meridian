@@ -570,7 +570,7 @@ export async function deployPosition({
     );
   }
 
-  if (process.env.DRY_RUN === "true") {
+  if (config.runtime.dryRunMode) {
     return {
       dry_run: true,
       would_deploy: {
@@ -1457,7 +1457,7 @@ export async function searchPools({ query, limit = 10 }) {
 // ─── Claim Fees ────────────────────────────────────────────────
 export async function claimFees({ position_address }) {
   position_address = normalizeMint(position_address);
-  if (process.env.DRY_RUN === "true") {
+  if (config.runtime.dryRunMode) {
     return { dry_run: true, would_claim: position_address, message: "DRY RUN — no transaction sent" };
   }
 
@@ -1503,7 +1503,7 @@ export async function claimFees({ position_address }) {
 // ─── Close Position ────────────────────────────────────────────
 export async function closePosition({ position_address, reason }) {
   position_address = normalizeMint(position_address);
-  if (process.env.DRY_RUN === "true") {
+  if (config.runtime.dryRunMode) {
     return { dry_run: true, would_close: position_address, message: "DRY RUN — no transaction sent" };
   }
 

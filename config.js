@@ -88,6 +88,7 @@ export const config = {
     minTokenAgeHours:   u.minTokenAgeHours   ?? null, // null = no minimum
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? null, // null = no maximum
     athFilterPct:       u.athFilterPct       ?? null, // e.g. -20 = only deploy if price is >= 20% below ATH
+    deployMode: u.deployMode ?? "off", // "off"=LLM only, "llm_fallback"=LLM→deterministic, "deterministic"=skip LLM
   },
 
   // ─── Position Management ────────────────
@@ -134,6 +135,11 @@ export const config = {
     managementIntervalMin:  u.managementIntervalMin  ?? 10,
     screeningIntervalMin:   u.screeningIntervalMin   ?? 30,
     healthCheckIntervalMin: u.healthCheckIntervalMin ?? 60,
+  },
+
+  // ─── Runtime Mode ──────────────────────
+  runtime: {
+    dryRunMode: u.dryRunMode ?? process.env.DRY_RUN === "true",
   },
 
   // ─── LLM Settings ──────────────────────
