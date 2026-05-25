@@ -216,6 +216,11 @@ export async function runManagementCycle({ silent = false } = {}) {
     positions = livePositions?.positions || [];
 
     if (positions.length === 0) {
+  if (!silent && telegramEnabled()) {
+    await sendMessage(`🔄 Management Cycle
+
+No open positions. Triggering screening cycle.`).catch(() => {});
+  }
       log("cron", "No open positions — triggering screening cycle");
       mgmtReport = "No open positions. Triggering screening cycle.";
       runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
@@ -381,6 +386,11 @@ After executing, write a brief one-line result per position.
 export async function runScreeningCycle({ silent = false } = {}) {
   if (_screeningBusy) {
     log("cron", "Screening skipped — previous cycle still running");
+    if (!silent && telegramEnabled()) {
+        await sendMessage(`🔍 Screening Cycle
+
+Screening skipped — previous cycle still running`).catch(() => {});
+    }
     return null;
   }
   _screeningBusy = true; // set immediately — prevents TOCTOU race with concurrent callers
@@ -394,6 +404,11 @@ export async function runScreeningCycle({ silent = false } = {}) {
     [prePositions, preBalance] = await Promise.all([getMyPositions({ force: true }), getWalletBalances()]);
     if (prePositions.total_positions >= config.risk.maxPositions) {
       log("cron", `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`);
+    if (!silent && telegramEnabled()) {
+        await sendMessage(`🔍 Screening Cycle
+
+Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`).catch(() => {});
+    }
       screenReport = `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions}).`;
       appendDecision({
         type: "skip",
@@ -408,6 +423,11 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const isDryRun = process.env.DRY_RUN === "true";
     if (!isDryRun && preBalance.sol < minRequired) {
       log("cron", `Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas)`);
+    if (!silent && telegramEnabled()) {
+        await sendMessage(`🔍 Screening Cycle
+
+Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas)`).catch(() => {});
+    }
       screenReport = `Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas).`;
       appendDecision({
         type: "skip",
