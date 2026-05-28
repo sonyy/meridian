@@ -623,6 +623,19 @@ export async function getTopCandidates({ limit = 10 } = {}) {
         pushFilteredReason(filteredOut, p, "token cooldown active");
         return false;
       }
+      // Hard organic score gate — even if API filter passed, enforce it client-side
+      const thisMinOrganic = Number(config.screening.minOrganic ?? 60);
+      const thisMinQuoteOrganic = Number(config.screening.minQuoteOrganic ?? 60);
+      const baseOrg = p.base?.organic_score ?? p.base?.organic ?? null;
+      const quoteOrg = p.quote?.organic_score ?? p.quote?.organic ?? null;
+      if (baseOrg != null && baseOrg < thisMinOrganic) {
+        pushFilteredReason(filteredOut, p, `base organic ${baseOrg} below minOrganic ${thisMinOrganic}`);
+        return false;
+      }
+      if (quoteOrg != null && quoteOrg < thisMinQuoteOrganic) {
+        pushFilteredReason(filteredOut, p, `quote organic ${quoteOrg} below minQuoteOrganic ${thisMinQuoteOrganic}`);
+        return false;
+      }
       return true;
     })
     .sort((a, b) => scoreCandidate(b) - scoreCandidate(a))
@@ -704,6 +717,23 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       if (p.is_wash) {
         log("screening", `Risk filter: dropped ${p.name} — wash trading flagged`);
         pushFilteredReason(filteredOut, p, "wash trading flagged");
+        return false;
+      }
+      return true;
+    }));
+
+    // Bundler/sniper hard filter — reject pools with high bundle or sniper concentration
+    const maxBundlePct = Number(config.screening.maxBundlePct ?? 30);
+    const maxSniperPct = Number(config.screening.maxSniperPct ?? 30);
+    eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+      if (p.bundle_pct != null && p.bundle_pct > maxBundlePct) {
+        log("screening", `Bundle filter: dropped ${p.name} — bundle ${p.bundle_pct}% > max ${maxBundlePct}%`);
+        pushFilteredReason(filteredOut, p, `bundle ${p.bundle_pct}% > maxBundlePct ${maxBundlePct}%`);
+        return false;
+      }
+      if (p.sniper_pct != null && p.sniper_pct > maxSniperPct) {
+        log("screening", `Sniper filter: dropped ${p.name} — sniper ${p.sniper_pct}% > max ${maxSniperPct}%`);
+        pushFilteredReason(filteredOut, p, `sniper ${p.sniper_pct}% > maxSniperPct ${maxSniperPct}%`);
         return false;
       }
       return true;

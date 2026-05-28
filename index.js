@@ -233,6 +233,25 @@ No open positions. Triggering screening cycle.`).catch(() => {});
       return { ...p, recall: recallForPool(p.pool) };
     });
 
+    // Fetch current pool volatility for volatility drop monitoring
+    if (config.management.volatilityCheckEnabled) {
+      const { getPoolDetail } = await import("./tools/screening.js");
+      await Promise.allSettled(positionData.map(async (p) => {
+        try {
+          const detail = await getPoolDetail({ pool_address: p.pool, timeframe: config.screening.timeframe || "5m" });
+          if (detail?.volatility != null) {
+            p.current_volatility = Number(detail.volatility);
+            const tracked = getTrackedPosition(p.position);
+            if (tracked) {
+              tracked.current_volatility = p.current_volatility;
+            }
+          }
+        } catch (e) {
+          log("cron_warn", `Could not fetch pool volatility for ${p.pair}: ${e.message}`);
+        }
+      }));
+    }
+
     // JS trailing TP check
     const exitMap = new Map();
     for (const p of positionData) {
@@ -294,7 +313,30 @@ No open positions. Triggering screening cycle.`).catch(() => {});
       const val = config.management.solMode ? `◎${p.total_value_usd ?? "?"}` : `$${p.total_value_usd ?? "?"}`;
       const unclaimed = config.management.solMode ? `◎${p.unclaimed_fees_usd ?? "?"}` : `$${p.unclaimed_fees_usd ?? "?"}`;
       const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.action;
-      let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}% | ${inRange} | ${statusLabel}`;
+      const organicScoreAtDeploy = getTrackedPosition(p.position)?.organic_score;
+      const organicNote = organicScoreAtDeploy != null ? ` Org:${organicScoreAtDeploy}` : "";
+      // Build proximity warnings for thresholds
+      const proximityWarnings = [];
+      if (p.pnl_pct != null && config.management.stopLossPct != null) {
+        const distToSl = p.pnl_pct - config.management.stopLossPct;
+        if (distToSl <= 3 && distToSl > 0) {
+          proximityWarnings.push(`⚠SL nearby (${p.pnl_pct.toFixed(1)}% vs ${config.management.stopLossPct}%)`);
+        }
+      }
+      if (p.pnl_pct != null && config.management.takeProfitPct != null) {
+        const distToTp = config.management.takeProfitPct - p.pnl_pct;
+        if (distToTp <= 3 && distToTp > 0) {
+          proximityWarnings.push(`🎯TP near (${p.pnl_pct.toFixed(1)}% vs ${config.management.takeProfitPct}%)`);
+        }
+      }
+      if (!p.in_range && p.minutes_out_of_range != null && config.management.outOfRangeWaitMinutes != null) {
+        const oorRemaining = config.management.outOfRangeWaitMinutes - p.minutes_out_of_range;
+        if (oorRemaining <= 5 && oorRemaining > 0) {
+          proximityWarnings.push(`⏰OOR near limit (${p.minutes_out_of_range}m/${config.management.outOfRangeWaitMinutes}m)`);
+        }
+      }
+      const proxStr = proximityWarnings.length ? ` | ${proximityWarnings.join(" ")}` : "";
+      let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}%${organicNote} | ${inRange} | ${statusLabel}${proxStr}`;
       if (p.instruction) line += `\nNote: "${p.instruction}"`;
       if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Trailing TP: ${act.reason}`;
       if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
@@ -851,11 +893,12 @@ Summarize the current portfolio health, total fees earned, and performance of al
             }
             continue;
           }
+          const isStopLoss = exit.action === "STOP_LOSS";
           const cooldownMs = config.schedule.managementIntervalMin * 60 * 1000;
           const sinceLastTrigger = Date.now() - _pollTriggeredAt;
-          if (sinceLastTrigger >= cooldownMs) {
+          if (isStopLoss || sinceLastTrigger >= cooldownMs) {
             _pollTriggeredAt = Date.now();
-            log("state", `[PnL poll] Exit alert: ${p.pair} — ${exit.reason} — triggering management`);
+            log("state", `[PnL poll] Exit alert: ${p.pair} — ${exit.reason}${isStopLoss ? " [IMMEDIATE]" : ""} — triggering management`);
             runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Poll-triggered management failed: ${e.message}`));
           } else {
             log("state", `[PnL poll] Exit alert: ${p.pair} — ${exit.reason} — cooldown (${Math.round((cooldownMs - sinceLastTrigger) / 1000)}s left)`);
@@ -864,11 +907,12 @@ Summarize the current portfolio health, total fees earned, and performance of al
         }
         const closeRule = getDeterministicCloseRule(p, config.management);
         if (closeRule) {
+          const isStopLoss = closeRule.rule === 1;
           const cooldownMs = config.schedule.managementIntervalMin * 60 * 1000;
           const sinceLastTrigger = Date.now() - _pollTriggeredAt;
-          if (sinceLastTrigger >= cooldownMs) {
+          if (isStopLoss || sinceLastTrigger >= cooldownMs) {
             _pollTriggeredAt = Date.now();
-            log("state", `[PnL poll] Deterministic close rule: ${p.pair} — Rule ${closeRule.rule}: ${closeRule.reason} — triggering management`);
+            log("state", `[PnL poll] Deterministic close rule: ${p.pair} — Rule ${closeRule.rule}: ${closeRule.reason}${isStopLoss ? " [IMMEDIATE]" : ""} — triggering management`);
             runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Poll-triggered management failed: ${e.message}`));
           } else {
             log("state", `[PnL poll] Deterministic close rule: ${p.pair} — Rule ${closeRule.rule}: ${closeRule.reason} — cooldown (${Math.round((cooldownMs - sinceLastTrigger) / 1000)}s left)`);
@@ -995,6 +1039,21 @@ function getDeterministicCloseRule(position, managementConfig) {
   ) {
     return { action: "CLOSE", rule: 5, reason: "low yield" };
   }
+  // Rule 6: Volatility drop — if volatility has dropped significantly since deploy
+  if (managementConfig.volatilityCheckEnabled && position.current_volatility != null) {
+    const tracked = getTrackedPosition(position.position);
+    const deployVolatility = tracked?.volatility;
+    if (deployVolatility != null && deployVolatility > 0) {
+      const dropPct = ((deployVolatility - position.current_volatility) / deployVolatility) * 100;
+      if (dropPct >= (managementConfig.maxVolatilityDropPct ?? 50)) {
+        return {
+          action: "CLOSE",
+          rule: 6,
+          reason: `volatility dropped ${dropPct.toFixed(0)}% (from ${deployVolatility} to ${position.current_volatility}) since deploy`,
+        };
+      }
+    }
+  }
   return null;
 }
 
@@ -1118,7 +1177,9 @@ function formatConfigSnapshot() {
     `Screening: ${config.screening.category} / ${config.screening.timeframe} | TVL ${config.screening.minTvl}-${config.screening.maxTvl}`,
     `GMGN interval: ${config.gmgn.interval} | OrderBy: ${config.gmgn.orderBy} | Dir: ${config.gmgn.direction}`,
     `Intervals: manage ${config.schedule.managementIntervalMin}m | screen ${config.schedule.screeningIntervalMin}m`,
-    `HiveMind: ${isHiveMindEnabled() ? "enabled" : "disabled"}${config.hiveMind.agentId ? ` | ${config.hiveMind.agentId}` : ""}`,
+    `Volatility check: ${config.management.volatilityCheckEnabled ? "on" : "off"} | max drop ${config.management.maxVolatilityDropPct}%`,
+    `SL cooldown: ${config.management.stopLossCooldownHours}h | neg PnL cooldown: ${config.management.negativePnlCooldownHours}h (threshold: ${config.management.negativePnlCooldownThreshold}%)`,
+    `HiveMind: ${isHiveMindEnabled() ? "enabled" : "disabled"}${config.hiveMind.agentId ? ` | ${config.hiveMind.agentId}` : ""}`, 
   ].join("\n");
 }
 
@@ -1178,6 +1239,11 @@ function settingValue(key) {
     repeatDeployCooldownTriggerCount: config.management.repeatDeployCooldownTriggerCount,
     repeatDeployCooldownHours: config.management.repeatDeployCooldownHours,
     repeatDeployCooldownMinFeeEarnedPct: config.management.repeatDeployCooldownMinFeeEarnedPct,
+    stopLossCooldownHours: config.management.stopLossCooldownHours,
+    negativePnlCooldownHours: config.management.negativePnlCooldownHours,
+    negativePnlCooldownThreshold: config.management.negativePnlCooldownThreshold,
+    volatilityCheckEnabled: config.management.volatilityCheckEnabled,
+    maxVolatilityDropPct: config.management.maxVolatilityDropPct,
     managementIntervalMin: config.schedule.managementIntervalMin,
     screeningIntervalMin: config.schedule.screeningIntervalMin,
     indicatorEntryPreset: config.indicators.entryPreset,
@@ -1268,6 +1334,11 @@ function renderSettingsMenu(page = "main") {
       inputButton("repeatDeployCooldownTriggerCount", "Repeat count"),
       inputButton("repeatDeployCooldownHours", "Repeat hrs"),
       inputButton("repeatDeployCooldownMinFeeEarnedPct", "Min fee earned %", { digits: 1 }),
+      inputButton("stopLossCooldownHours", "SL cooldown (h)"),
+      inputButton("negativePnlCooldownHours", "Neg PnL cooldown (h)"),
+      inputButton("negativePnlCooldownThreshold", "Neg PnL threshold %"),
+      [toggleButton("volatilityCheckEnabled", "Volatility check")],
+      inputButton("maxVolatilityDropPct", "Max vol drop %"),
     ];
   } else if (page === "screen") {
     rows = [
