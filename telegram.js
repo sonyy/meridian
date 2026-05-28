@@ -509,6 +509,17 @@ export async function notifyOutOfRange({ pair, minutesOOR }) {
   );
 }
 
+export async function notifyNearThreshold({ pair, pnlPct, thresholdType, thresholdValue, distance }) {
+  if (hasActiveLiveMessage()) return;
+  const emoji = thresholdType === "stop_loss" ? "🛑" : thresholdType === "take_profit" ? "🎯" : "⚠️";
+  const label = thresholdType === "stop_loss" ? "Stop loss" : thresholdType === "take_profit" ? "Take profit" : "Threshold";
+  await sendHTML(
+    `${emoji} <b>Near ${label}</b> ${pair}
+` +
+    `PnL: ${pnlPct != null ? pnlPct.toFixed(2) + "%" : "?"} | ${label}: ${thresholdValue}% | ${distance != null ? distance.toFixed(2) + "% away" : ""}`
+  );
+}
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }

@@ -176,6 +176,30 @@ export function recordPoolDeploy(poolAddress, deployData) {
     log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (low yield close)`);
   }
 
+  // Set cooldown for stop-loss closes — negative outcome, avoid immediate redeploy
+  if (deploy.close_reason && (deploy.close_reason.toLowerCase().includes("stop loss") || deploy.close_reason.toLowerCase().includes("stop_loss"))) {
+    const cooldownHours = config.management.stopLossCooldownHours ?? 2;
+    const reason = "stop loss close";
+    const poolCooldownUntil = setPoolCooldown(entry, cooldownHours, reason);
+    const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, cooldownHours, reason);
+    log("pool-memory", `Cooldown set for ${entry.name} until ${poolCooldownUntil} (stop loss close)`);
+    if (entry.base_mint && mintCooldownUntil) {
+      log("pool-memory", `Base mint cooldown set for ${entry.base_mint.slice(0, 8)} until ${mintCooldownUntil} (stop loss close)`);
+    }
+  }
+
+  // Set cooldown for significant negative PnL (e.g. -20% or worse) even if not flagged as stop-loss
+  if (deploy.pnl_pct != null && deploy.pnl_pct < (config.management.negativePnlCooldownThreshold ?? -20)) {
+    const cooldownHours = config.management.negativePnlCooldownHours ?? 2;
+    const reason = `negative PnL (${deploy.pnl_pct.toFixed(1)}%)`;
+    const poolCooldownUntil = setPoolCooldown(entry, cooldownHours, reason);
+    const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, cooldownHours, reason);
+    log("pool-memory", `Cooldown set for ${entry.name} until ${poolCooldownUntil} (${reason})`);
+    if (entry.base_mint && mintCooldownUntil) {
+      log("pool-memory", `Base mint cooldown set for ${entry.base_mint.slice(0, 8)} until ${mintCooldownUntil} (${reason})`);
+    }
+  }
+
   const oorTriggerCount = config.management.oorCooldownTriggerCount ?? 3;
   const oorCooldownHours = config.management.oorCooldownHours ?? 12;
   const recentDeploys = entry.deploys.slice(-oorTriggerCount);

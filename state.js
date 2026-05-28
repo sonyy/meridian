@@ -86,6 +86,7 @@ export function trackPosition({
     active_bin_at_deploy: active_bin,
     bin_step,
     volatility,
+    current_volatility: null,
     fee_tvl_ratio,
     initial_fee_tvl_24h: fee_tvl_ratio,
     organic_score,
