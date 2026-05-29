@@ -602,6 +602,10 @@ export async function executeTool(name, args) {
     const safetyCheck = await runSafetyChecks(name, args);
     if (!safetyCheck.pass) {
       log("safety_block", `${name} blocked: ${safetyCheck.reason}`);
+      if (name === "deploy_position") {
+        const poolLabel = args.pool_name || args.pool_address?.slice(0, 8) || "unknown";
+        sendMessage(`❌ Deploy blocked: ${poolLabel} — ${safetyCheck.reason}`).catch(() => {});
+      }
       return {
         blocked: true,
         reason: safetyCheck.reason,
