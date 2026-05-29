@@ -1199,11 +1199,48 @@ function renderSettingsMenu(page = "main") {
         settingButton(`Strategy: spot`, "cfg:set:strategy:spot"),
         settingButton(`Strategy: bid_ask`, "cfg:set:strategy:bid_ask"),
       ],
-      stepButtons("minBinsBelow", "Min bins", 1, { digits: 0 }),
-      stepButtons("maxBinsBelow", "Max bins", 1, { digits: 0 }),
-      stepButtons("defaultBinsBelow", "Default bins", 1, { digits: 0 }),
-      stepButtons("managementIntervalMin", "Manage min", 1, { digits: 0 }),
-      stepButtons("screeningIntervalMin", "Screen min", 5, { digits: 0 }),
+      [
+        inputButton("gmgnMinVolume", "Min volume")[0],
+        inputButton("gmgnMinTokenAgeHours", "Min token age (h)")[0],
+      ],
+      [
+        inputButton("gmgnMaxTokenAgeHours", "Max token age (h)")[0],
+        inputButton("gmgnMaxBundlerRate", "Max bundler %")[0],
+      ],
+      inputButton("managementIntervalMin", "Manage interval (min)"),
+      inputButton("screeningIntervalMin", "Screen interval (min)"),
+    ];
+  } else if (page === "strategy") {
+    rows = [
+      [
+        settingButton("spot", "cfg:set:strategy:spot"),
+        settingButton("bid_ask", "cfg:set:strategy:bid_ask"),
+      ],
+      inputButton("minBinsBelow", "Min bins"),
+      inputButton("maxBinsBelow", "Max bins"),
+    ];
+  } else if (page === "gmgn") {
+    rows = [
+      [toggleButton("gmgnIndicatorFilter", "Indicator filter"), toggleButton("gmgnRequireKol", "Require KOL")],
+      [
+        settingButton("TF: 5m", "cfg:set:gmgnIndicatorInterval:5_MINUTE"),
+        settingButton("TF: 15m", "cfg:set:gmgnIndicatorInterval:15_MINUTE"),
+        settingButton("TF: 1h", "cfg:set:gmgnIndicatorInterval:1h"),
+      ],
+      [toggleButton("gmgnRequireBullishSt", "Bullish ST"), toggleButton("gmgnRejectAtBottom", "Reject at bottom"), toggleButton("gmgnRequireAboveSt", "Above ST")],
+      inputButton("gmgnMinRsi", "Min RSI"),
+      inputButton("gmgnMaxRsi", "Max RSI"),
+      inputButton("gmgnMinKolCount", "Min KOL"),
+      inputButton("gmgnMinTotalFeeSol", "Min fee SOL"),
+      inputButton("gmgnMinHolders", "Min holders"),
+      [settingButton("KOL settings", "cfg:page:kol")],
+    ];
+  } else if (page === "kol") {
+    rows = [
+      inputButton("gmgnPreferredKolNames", "Preferred KOL (comma-sep)"),
+      inputButton("gmgnPreferredKolMinHoldPct", "Preferred KOL min hold %"),
+      inputButton("gmgnDumpKolNames", "Dump KOL (comma-sep)"),
+      inputButton("gmgnDumpKolMinHoldPct", "Dump KOL min hold %"),
     ];
   } else if (page === "indicators") {
     rows = [
@@ -1228,7 +1265,7 @@ function renderSettingsMenu(page = "main") {
   } else {
     rows = [
       [toggleButton("solMode", "SOL mode"), toggleButton("lpAgentRelayEnabled", "LPAgent relay")],
-      [toggleButton("chartIndicatorsEnabled", "Chart indicators"), toggleButton("trailingTakeProfit", "Trailing TP")],
+      [toggleButton("trailingTakeProfit", "Trailing TP")],
       [
         settingButton("Risk / deploy", "cfg:page:risk"),
         settingButton("Screening", "cfg:page:screen"),
