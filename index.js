@@ -342,7 +342,7 @@ No open positions. Triggering screening cycle.`).catch(() => {});
       const proxStr = proximityWarnings.length ? ` | ${proximityWarnings.join(" ")}` : "";
       let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}%${organicNote} | ${inRange} | ${statusLabel}${proxStr}`;
       if (p.instruction) line += `\nNote: "${p.instruction}"`;
-      if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Trailing TP: ${act.reason}`;
+      if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Exit: ${act.reason}`;
       if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
       if (act.action === "CLAIM") line += `\n→ Claiming fees`;
       return line;
@@ -371,7 +371,7 @@ No open positions. Triggering screening cycle.`).catch(() => {});
         return [
           `POSITION: ${p.pair} (${p.position})`,
           `  pool: ${p.pool}`,
-          `  action: ${act.action}${act.rule && act.rule !== "exit" ? ` — Rule ${act.rule}: ${act.reason}` : ""}${act.rule === "exit" ? ` — ⚡ Trailing TP: ${act.reason}` : ""}`,
+          `  action: ${act.action}${act.rule && act.rule !== "exit" ? ` — Rule ${act.rule}: ${act.reason}` : ""}${act.rule === "exit" ? ` — ⚡ ${act.reason.replace(/:.*/, "")}` : ""}`,
           `  pnl_pct: ${p.pnl_pct}% | unclaimed_fees: ${cur}${p.unclaimed_fees_usd} | value: ${cur}${p.total_value_usd} | fee_per_tvl_24h: ${p.fee_per_tvl_24h ?? "?"}%`,
           `  bins: lower=${p.lower_bin} upper=${p.upper_bin} active=${p.active_bin} | oor_minutes: ${p.minutes_out_of_range ?? 0}`,
           p.instruction ? `  instruction: "${p.instruction}"` : null,
@@ -830,12 +830,12 @@ Summarize the current portfolio health, total fees earned, and performance of al
             }
             continue;
           }
-          const isStopLoss = exit.action === "STOP_LOSS";
+          const isImmediate = exit.action === "STOP_LOSS" || exit.action === "RUG_GUARD";
           const cooldownMs = config.schedule.managementIntervalMin * 60 * 1000;
           const sinceLastTrigger = Date.now() - _pollTriggeredAt;
-          if (isStopLoss || sinceLastTrigger >= cooldownMs) {
+          if (isImmediate || sinceLastTrigger >= cooldownMs) {
             _pollTriggeredAt = Date.now();
-            log("state", `[PnL poll] Exit alert: ${p.pair} — ${exit.reason}${isStopLoss ? " [IMMEDIATE]" : ""} — triggering management`);
+            log("state", `[PnL poll] Exit alert: ${p.pair} — ${exit.reason}${isImmediate ? " [IMMEDIATE]" : ""} — triggering management`);
             runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Poll-triggered management failed: ${e.message}`));
           } else {
             log("state", `[PnL poll] Exit alert: ${p.pair} — ${exit.reason} — cooldown (${Math.round((cooldownMs - sinceLastTrigger) / 1000)}s left)`);
@@ -844,12 +844,12 @@ Summarize the current portfolio health, total fees earned, and performance of al
         }
         const closeRule = getDeterministicCloseRule(p, config.management);
         if (closeRule) {
-          const isStopLoss = closeRule.rule === 1;
+          const isImmediate = closeRule.rule === 1;
           const cooldownMs = config.schedule.managementIntervalMin * 60 * 1000;
           const sinceLastTrigger = Date.now() - _pollTriggeredAt;
-          if (isStopLoss || sinceLastTrigger >= cooldownMs) {
+          if (isImmediate || sinceLastTrigger >= cooldownMs) {
             _pollTriggeredAt = Date.now();
-            log("state", `[PnL poll] Deterministic close rule: ${p.pair} — Rule ${closeRule.rule}: ${closeRule.reason}${isStopLoss ? " [IMMEDIATE]" : ""} — triggering management`);
+            log("state", `[PnL poll] Deterministic close rule: ${p.pair} — Rule ${closeRule.rule}: ${closeRule.reason}${isImmediate ? " [IMMEDIATE]" : ""} — triggering management`);
             runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Poll-triggered management failed: ${e.message}`));
           } else {
             log("state", `[PnL poll] Deterministic close rule: ${p.pair} — Rule ${closeRule.rule}: ${closeRule.reason} — cooldown (${Math.round((cooldownMs - sinceLastTrigger) / 1000)}s left)`);
