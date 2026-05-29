@@ -1342,11 +1342,6 @@ function renderSettingsMenu(page = "main") {
     ];
   } else if (page === "screen") {
     rows = [
-      [
-        settingButton("Source: Meteora", "cfg:set:screeningSource:meteora"),
-        settingButton("Source: GMGN", "cfg:set:screeningSource:gmgn"),
-      ],
-      [toggleButton("gmgnRequireKol", "GMGN require KOL")],
       [toggleButton("useDiscordSignals", "Discord signals"), toggleButton("blockPvpSymbols", "PVP hard block")],
       [
         settingButton("5m", "cfg:set:gmgnInterval:5m"),
@@ -1362,7 +1357,6 @@ function renderSettingsMenu(page = "main") {
         inputButton("gmgnMaxTokenAgeHours", "Max token age (h)")[0],
         inputButton("gmgnMaxBundlerRate", "Max bundler %")[0],
       ],
-      [settingButton("KOL settings", "cfg:page:kol")],
       inputButton("managementIntervalMin", "Manage interval (min)"),
       inputButton("screeningIntervalMin", "Screen interval (min)"),
     ];
@@ -1425,7 +1419,7 @@ function renderSettingsMenu(page = "main") {
         settingButton("Source: GMGN", "cfg:set:screeningSource:gmgn"),
       ],
       [toggleButton("solMode", "SOL mode"), toggleButton("lpAgentRelayEnabled", "LPAgent relay")],
-      [toggleButton("chartIndicatorsEnabled", "Chart indicators"), toggleButton("trailingTakeProfit", "Trailing TP")],
+      [toggleButton("trailingTakeProfit", "Trailing TP")],
       [
         settingButton("Risk / deploy", "cfg:page:risk"),
         settingButton("Screening", "cfg:page:screen"),
