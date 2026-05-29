@@ -44,7 +44,7 @@ const TIMEFRAME_MINUTES = {
   "24h": 1440,
 };
 import { log, logAction } from "../logger.js";
-import { notifyDeploy, notifyClose, notifySwap } from "../telegram.js";
+import { sendMessage, sendHTML, notifyDeploy, notifyClose, notifySwap } from "../telegram.js";
 
 const SENSITIVE_CONFIG_KEYS = new Set([
   "gmgnApiKey",
@@ -666,6 +666,13 @@ export async function executeTool(name, args) {
         } catch (e) {
           log("executor_warn", `Auto-swap after claim failed: ${e.message}`);
         }
+      }
+    } else if (result?.error || result?.blocked) {
+      // Notify on deploy failures
+      if (name === "deploy_position") {
+        const reason = result.reason || result.error || "unknown error";
+        const poolLabel = args.pool_name || args.pool_address?.slice(0, 8) || "unknown";
+        sendMessage(`❌ Deploy failed: ${poolLabel} — ${reason}`).catch(() => {});
       }
     }
 
