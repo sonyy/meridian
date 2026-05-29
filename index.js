@@ -1224,6 +1224,10 @@ function settingValue(key) {
     gmgnMinKolCount: config.gmgn.minKolCount,
     gmgnMinTotalFeeSol: config.gmgn.minTotalFeeSol,
     gmgnMinHolders: config.gmgn.minHolders,
+    gmgnMaxFreshWalletRate: config.gmgn.maxFreshWalletRate,
+    gmgnMaxDevTeamHoldRate: config.gmgn.maxDevTeamHoldRate,
+    gmgnMaxBotDegenRate: config.gmgn.maxBotDegenRate,
+    gmgnMaxTop10HolderRate: config.gmgn.maxTop10HolderRate,
     strategy: config.strategy.strategy,
     minBinsBelow: config.strategy.minBinsBelow,
     maxBinsBelow: config.strategy.maxBinsBelow,
@@ -1383,6 +1387,10 @@ function renderSettingsMenu(page = "main") {
       inputButton("gmgnMinKolCount", "Min KOL"),
       inputButton("gmgnMinTotalFeeSol", "Min fee SOL"),
       inputButton("gmgnMinHolders", "Min holders"),
+      inputButton("gmgnMaxFreshWalletRate", "Max fresh wallet (0-1)"),
+      inputButton("gmgnMaxDevTeamHoldRate", "Max dev hold (0-1)"),
+      inputButton("gmgnMaxBotDegenRate", "Max bot degen (0-1)"),
+      inputButton("gmgnMaxTop10HolderRate", "Max top10 holder (0-1)"),
     ];
   } else if (page === "kol") {
     rows = [
