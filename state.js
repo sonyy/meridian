@@ -382,7 +382,7 @@ export function getStateSummary() {
 }
 
 /**
- * Check all exit conditions for a position (trailing TP, stop loss, OOR, low yield).
+ * Check all exit conditions for a position (rug guard, trailing TP, stop loss, OOR, low yield).
  * Updates peak_pnl_pct, trailing_active, and OOR state.
  * @param {string} position_address
  * @param {object} positionData - fields from getMyPositions: pnl_pct, in_range, fee_per_tvl_24h
@@ -428,6 +428,20 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   }
 
   if (changed) save(state);
+
+  // ── Rug guard: catastrophic drop from peak, takes precedence over SL ──
+  const rugGuardDropPct = mgmtConfig.rugGuardDropPct;
+  if (!pnl_pct_suspicious && currentPnlPct != null && rugGuardDropPct > 0 && Number.isFinite(pos.peak_pnl_pct) && pos.peak_pnl_pct > currentPnlPct) {
+    const peakRatio = 1 + pos.peak_pnl_pct / 100;
+    const currentRatio = 1 + currentPnlPct / 100;
+    const dropFromPeak = (currentRatio / peakRatio - 1) * 100;
+    if (dropFromPeak <= -rugGuardDropPct) {
+      return {
+        action: "RUG_GUARD",
+        reason: `Rug guard: dropped ${Math.abs(dropFromPeak).toFixed(1)}% from peak (${pos.peak_pnl_pct.toFixed(1)}% → ${currentPnlPct.toFixed(1)}%) ≥ ${rugGuardDropPct}%`,
+      };
+    }
+  }
 
   // ── Stop loss ──────────────────────────────────────────────────
   if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct <= mgmtConfig.stopLossPct) {

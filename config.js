@@ -200,6 +200,8 @@ export const config = {
     solMode:               u.solMode               ?? false,
     volatilityCheckEnabled: u.volatilityCheckEnabled ?? false,
     maxVolatilityDropPct:   u.maxVolatilityDropPct   ?? 50,
+    // Rug guard: catastrophic PnL drop from peak, fires before SL
+    rugGuardDropPct:        u.rugGuardDropPct        ?? 0,   // 0 = off, e.g. 50 = exit when PnL drops 50% from peak value
   },
 
   // ─── Strategy Mapping ───────────────────
