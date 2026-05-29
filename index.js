@@ -1233,7 +1233,6 @@ function renderSettingsMenu(page = "main") {
       inputButton("gmgnMinKolCount", "Min KOL"),
       inputButton("gmgnMinTotalFeeSol", "Min fee SOL"),
       inputButton("gmgnMinHolders", "Min holders"),
-      [settingButton("KOL settings", "cfg:page:kol")],
     ];
   } else if (page === "kol") {
     rows = [
@@ -1266,14 +1265,7 @@ function renderSettingsMenu(page = "main") {
     rows = [
       [toggleButton("solMode", "SOL mode"), toggleButton("lpAgentRelayEnabled", "LPAgent relay")],
       [toggleButton("trailingTakeProfit", "Trailing TP")],
-      [
-        settingButton("Risk / deploy", "cfg:page:risk"),
-        settingButton("Screening", "cfg:page:screen"),
-      ],
-      [
-        settingButton("Indicators", "cfg:page:indicators"),
-        settingButton("Show config", "cfg:show"),
-      ],
+      [settingButton("Show config", "cfg:show")],
     ];
   }
 
