@@ -685,6 +685,12 @@ export async function executeTool(name, args) {
       success: false,
     });
 
+    // Notify on deploy failures even when thrown (most validation errors throw)
+    if (name === "deploy_position") {
+      const poolLabel = args.pool_name || args.pool_address?.slice(0, 8) || "unknown";
+      sendMessage(`❌ Deploy failed: ${poolLabel} — ${error.message}`).catch(() => {});
+    }
+
     // Return error to LLM so it can decide what to do
     return {
       error: error.message,
