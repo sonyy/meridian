@@ -709,6 +709,7 @@ Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequ
 
     let deployAttempted = false;
     let deploySucceeded = false;
+    let deployFailReason = null;
     const { content } = await agentLoop(`
 SCREENING CYCLE
 ${strategyBlock}
@@ -789,6 +790,7 @@ IMPORTANT:
           if (name === "deploy_position") {
             deployAttempted = true;
             deploySucceeded = Boolean(success && result?.success !== false && !result?.error && !result?.blocked);
+            if (!deploySucceeded && result?.reason) deployFailReason = result.reason;
           }
           await liveMessage?.toolFinish(name, result, success);
         },
@@ -814,7 +816,9 @@ IMPORTANT:
     // Append deploy result to report so it's always visible in Telegram
     if (deployAttempted) {
       const resultIcon = deploySucceeded ? '✅' : '❌';
-      screenReport += `\n\n${resultIcon} Deploy ${deploySucceeded ? 'berhasil' : 'gagal'}`;
+      let line = `${resultIcon} Deploy ${deploySucceeded ? 'berhasil' : 'gagal'}`;
+      if (!deploySucceeded && deployFailReason) line += `: ${deployFailReason}`;
+      screenReport += `\n\n${line}`;
     }
   } catch (error) {
     log("cron_error", `Screening cycle failed: ${error.message}`);
