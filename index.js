@@ -1427,7 +1427,7 @@ function renderSettingsMenu(page = "main") {
       ],
       inputButton("rsiLength", "RSI length"),
       [{ text: "── SOL Supertrend ──", callback_data: "cfg:noop" }],
-      toggleButton("requireSolSupertrend", "SOL ST entry guard"),
+      [toggleButton("requireSolSupertrend", "SOL ST entry guard")],
       [
         settingButton("SOL ST: 5m", "cfg:set:solSupertrendTimeframe:5m"),
         settingButton("SOL ST: 15m", "cfg:set:solSupertrendTimeframe:15m"),
