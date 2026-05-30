@@ -1,4 +1,5 @@
 import { discoverPools, getPoolDetail, getTopCandidates } from "./screening.js";
+import { checkSolSupertrend } from "./solSupertrend.js";
 import {
   getActiveBin,
   deployPosition,
@@ -436,6 +437,9 @@ const toolMap = {
       rsiOversold: ["indicators", "rsiOversold", ["chartIndicators", "rsiOversold"]],
       rsiOverbought: ["indicators", "rsiOverbought", ["chartIndicators", "rsiOverbought"]],
       requireAllIntervals: ["indicators", "requireAllIntervals", ["chartIndicators", "requireAllIntervals"]],
+      // SOL supertrend entry guard
+      requireSolSupertrend: ["screening", "requireSolSupertrend"],
+      solSupertrendTimeframe: ["screening", "solSupertrendTimeframe"],
     };
 
     const applied = {};
@@ -710,6 +714,26 @@ async function runSafetyChecks(name, args) {
     case "deploy_position": {
       const poolThresholds = await validateDeployPoolThresholds(args);
       if (!poolThresholds.pass) return poolThresholds;
+
+      // SOL supertrend entry guard — only allow deploy if SOL trend is bullish
+      if (config.screening.requireSolSupertrend) {
+        const stTf = config.screening.solSupertrendTimeframe || "both";
+        try {
+          const solTrend = await checkSolSupertrend(stTf);
+          if (!solTrend.bullish) {
+            const parts = [];
+            if (solTrend.tf5m != null) parts.push(`5m:${solTrend.tf5m ? "🟢" : "🔴"}`);
+            if (solTrend.tf15m != null) parts.push(`15m:${solTrend.tf15m ? "🟢" : "🔴"}`);
+            log("screening", `SOL supertrend bearish (${parts.join(" ")}) at $${solTrend.price.toFixed(2)} — deploy blocked`);
+            return {
+              pass: false,
+              reason: `SOL supertrend bearish (${parts.join(" ")}) at $${solTrend.price.toFixed(2)}. Entry blocked until SOL trend turns bullish.`,
+            };
+          }
+        } catch (err) {
+          log("screening_warn", `SOL supertrend check failed: ${err.message} — allowing deploy`);
+        }
+      }
 
       // Reject pools with bin_step out of configured range
       const minStep = config.screening.minBinStep;
