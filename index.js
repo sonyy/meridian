@@ -1299,7 +1299,7 @@ function renderSettingsMenu(page = "main") {
         settingButton("Exit: BB+RSI", "cfg:set:indicatorExitPreset:bb_plus_rsi"),
       ],
       inputButton("rsiLength", "RSI length"),
-      [{ text: "── SOL Supertrend ──", callback_data: "noop" }],
+      [{ text: "── SOL Supertrend ──", callback_data: "cfg:noop" }],
       toggleButton("requireSolSupertrend", "SOL ST entry guard"),
       [
         settingButton("SOL ST: 5m", "cfg:set:solSupertrendTimeframe:5m"),
