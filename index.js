@@ -1185,6 +1185,7 @@ function renderSettingsMenu(page = "main") {
     `Strategy: ${config.strategy.strategy} | bins ${config.strategy.minBinsBelow}-${config.strategy.maxBinsBelow} | deploy ${config.management.deployAmountSol} SOL`,
     `TP/SL: ${config.management.takeProfitPct}% / ${config.management.stopLossPct}% | trailing ${config.management.trailingTakeProfit ? "on" : "off"}`,
     `Token indicators: ${config.indicators.enabled ? "on" : "off"} | entry ${config.indicators.entryPreset} | ${fmtSettingValue(config.indicators.intervals)}`,
+    `SOL ST: guard ${config.screening.requireSolSupertrend ? "on" : "off"} | timeframe ${config.screening.solSupertrendTimeframe || "both"}`,
   ].join("\n");
 
   const nav = [
