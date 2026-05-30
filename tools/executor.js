@@ -613,7 +613,7 @@ export async function executeTool(name, args) {
   try {
     const result = await fn(args);
     const duration = Date.now() - startTime;
-    const success = result?.success !== false && !result?.error;
+    const success = result?.success !== false && !result?.error && !result?.blocked;
 
     logAction({
       tool: name,
