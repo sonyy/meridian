@@ -810,6 +810,12 @@ IMPORTANT:
         reason: stripThink(content).slice(0, 500),
       });
     }
+
+    // Append deploy result to report so it's always visible in Telegram
+    if (deployAttempted) {
+      const resultIcon = deploySucceeded ? '✅' : '❌';
+      screenReport += `\n\n${resultIcon} Deploy ${deploySucceeded ? 'berhasil' : 'gagal'}`;
+    }
   } catch (error) {
     log("cron_error", `Screening cycle failed: ${error.message}`);
     screenReport = `Screening cycle failed: ${error.message}`;
