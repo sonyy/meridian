@@ -1146,6 +1146,8 @@ function settingValue(key) {
     rsiLength: config.indicators.rsiLength,
     indicatorIntervals: config.indicators.intervals,
     requireAllIntervals: config.indicators.requireAllIntervals,
+    requireSolSupertrend: config.screening.requireSolSupertrend,
+    solSupertrendTimeframe: config.screening.solSupertrendTimeframe,
   };
   return values[key];
 }
@@ -1182,7 +1184,7 @@ function renderSettingsMenu(page = "main") {
     `Mode: ${config.management.solMode ? "SOL" : "USD"} | Relay: ${config.api.lpAgentRelayEnabled ? "on" : "off"}`,
     `Strategy: ${config.strategy.strategy} | bins ${config.strategy.minBinsBelow}-${config.strategy.maxBinsBelow} | deploy ${config.management.deployAmountSol} SOL`,
     `TP/SL: ${config.management.takeProfitPct}% / ${config.management.stopLossPct}% | trailing ${config.management.trailingTakeProfit ? "on" : "off"}`,
-    `Indicators: ${config.indicators.enabled ? "on" : "off"} | entry ${config.indicators.entryPreset} | ${fmtSettingValue(config.indicators.intervals)}`,
+    `Token indicators: ${config.indicators.enabled ? "on" : "off"} | entry ${config.indicators.entryPreset} | ${fmtSettingValue(config.indicators.intervals)}`,
   ].join("\n");
 
   const nav = [
@@ -1190,7 +1192,9 @@ function renderSettingsMenu(page = "main") {
       settingButton("Main", "cfg:page:main"),
       settingButton("Risk", "cfg:page:risk"),
       settingButton("Screen", "cfg:page:screen"),
-      settingButton("Indicators", "cfg:page:indicators"),
+      settingButton("Token ind.", "cfg:page:indicators"),
+      settingButton("GMGN", "cfg:page:gmgn"),
+      settingButton("KOL", "cfg:page:kol"),
     ],
   ];
 
@@ -1252,13 +1256,13 @@ function renderSettingsMenu(page = "main") {
     ];
   } else if (page === "gmgn") {
     rows = [
-      [toggleButton("gmgnIndicatorFilter", "Indicator filter"), toggleButton("gmgnRequireKol", "Require KOL")],
+      [toggleButton("gmgnIndicatorFilter", "Token indicators"), toggleButton("gmgnRequireKol", "Require KOL")],
       [
-        settingButton("TF: 5m", "cfg:set:gmgnIndicatorInterval:5_MINUTE"),
-        settingButton("TF: 15m", "cfg:set:gmgnIndicatorInterval:15_MINUTE"),
-        settingButton("TF: 1h", "cfg:set:gmgnIndicatorInterval:1h"),
+        settingButton("Token TF: 5m", "cfg:set:gmgnIndicatorInterval:5_MINUTE"),
+        settingButton("Token TF: 15m", "cfg:set:gmgnIndicatorInterval:15_MINUTE"),
+        settingButton("Token TF: 1h", "cfg:set:gmgnIndicatorInterval:1h"),
       ],
-      [toggleButton("gmgnRequireBullishSt", "Bullish ST"), toggleButton("gmgnRejectAtBottom", "Reject at bottom"), toggleButton("gmgnRequireAboveSt", "Above ST")],
+      [toggleButton("gmgnRequireBullishSt", "Token ST bullish"), toggleButton("gmgnRejectAtBottom", "Reject at bottom"), toggleButton("gmgnRequireAboveSt", "Token above ST")],
       inputButton("gmgnMinRsi", "Min RSI"),
       inputButton("gmgnMaxRsi", "Max RSI"),
       inputButton("gmgnMinKolCount", "Min KOL"),
@@ -1278,11 +1282,11 @@ function renderSettingsMenu(page = "main") {
     ];
   } else if (page === "indicators") {
     rows = [
-      [toggleButton("chartIndicatorsEnabled", "Chart indicators"), toggleButton("requireAllIntervals", "Require all TF")],
+      [toggleButton("chartIndicatorsEnabled", "Token indicators"), toggleButton("requireAllIntervals", "Token: all TF")],
       [
-        settingButton("TF: 5m", "cfg:set:indicatorIntervals:5_MINUTE"),
-        settingButton("TF: 15m", "cfg:set:indicatorIntervals:15_MINUTE"),
-        settingButton("TF: both", "cfg:set:indicatorIntervals:both"),
+        settingButton("Token TF: 5m", "cfg:set:indicatorIntervals:5_MINUTE"),
+        settingButton("Token TF: 15m", "cfg:set:indicatorIntervals:15_MINUTE"),
+        settingButton("Token TF: both", "cfg:set:indicatorIntervals:both"),
       ],
       [
         settingButton("Entry: ST", "cfg:set:indicatorEntryPreset:supertrend_break"),
@@ -1294,7 +1298,14 @@ function renderSettingsMenu(page = "main") {
         settingButton("Exit: RSI", "cfg:set:indicatorExitPreset:rsi_reversal"),
         settingButton("Exit: BB+RSI", "cfg:set:indicatorExitPreset:bb_plus_rsi"),
       ],
-      stepButtons("rsiLength", "RSI len", 1, { digits: 0 }),
+      inputButton("rsiLength", "RSI length"),
+      [{ text: "── SOL Supertrend ──", callback_data: "noop" }],
+      toggleButton("requireSolSupertrend", "SOL ST entry guard"),
+      [
+        settingButton("SOL ST: 5m", "cfg:set:solSupertrendTimeframe:5m"),
+        settingButton("SOL ST: 15m", "cfg:set:solSupertrendTimeframe:15m"),
+        settingButton("SOL ST: both", "cfg:set:solSupertrendTimeframe:both"),
+      ],
     ];
   } else {
     rows = [
@@ -1320,6 +1331,12 @@ function normalizeMenuValue(key, raw) {
   if (key === "indicatorIntervals") {
     if (raw === "both") return ["5_MINUTE", "15_MINUTE"];
     return [raw];
+  }
+  if (key === "solSupertrendTimeframe") {
+    return raw; // "5m", "15m", or "both"
+  }
+  if (key === "gmgnPreferredKolNames" || key === "gmgnDumpKolNames") {
+    return raw.split(",").map((s) => s.trim()).filter(Boolean);
   }
   return parseConfigValue(raw);
 }
@@ -1385,11 +1402,17 @@ async function applySettingsMenuCallback(msg) {
     await answerCallbackQuery(msg.callbackQueryId, "Config update failed");
     return;
   }
-  page = key.startsWith("indicator") || key === "chartIndicatorsEnabled" || key === "rsiLength" || key === "requireAllIntervals"
-    ? "indicators"
-    : ["useDiscordSignals", "blockPvpSymbols", "strategy", "minBinsBelow", "maxBinsBelow", "defaultBinsBelow", "managementIntervalMin", "screeningIntervalMin"].includes(key)
-      ? "screen"
-      : "risk";
+  page = ["gmgnPreferredKolNames", "gmgnPreferredKolMinHoldPct", "gmgnDumpKolNames", "gmgnDumpKolMinHoldPct"].includes(key) ? "kol"
+    : ["gmgnMinVolume", "gmgnMaxBundlerRate", "gmgnMinTokenAgeHours", "gmgnMaxTokenAgeHours"].includes(key) ? "screen"
+    : key.startsWith("gmgn") && key !== "gmgnRequireKol"
+      ? "gmgn"
+      : key.startsWith("indicator") || key === "chartIndicatorsEnabled" || key === "rsiLength" || key === "requireAllIntervals" || key === "requireSolSupertrend" || key === "solSupertrendTimeframe"
+        ? "indicators"
+        : ["minBinsBelow", "maxBinsBelow"].includes(key)
+          ? "strategy"
+          : ["useDiscordSignals", "blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "screeningSource", "gmgnRequireKol"].includes(key)
+            ? "screen"
+            : "risk";
   await answerCallbackQuery(msg.callbackQueryId, `Updated ${key}`);
   await showSettingsMenu({ messageId: msg.messageId, page });
 }
