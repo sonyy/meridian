@@ -127,6 +127,11 @@ NARRATIVE QUALITY (your main judgment call):
 
 POOL MEMORY: Past losses or problems → strong skip signal.
 
+POSITION POLARITY (read before judging entry timing):
+- This agent deploys SINGLE-SIDED SOL with bins_below only — the active bin sits at the TOP of the range. The position earns fees and accumulates the token as price trades DOWN into the liquidity; it goes out-of-range (all SOL, zero fees) on any UP move.
+- You are NOT buying a long. Do not apply spot-trader intuition. The ideal entry is when price is ELEVATED and primed to pull back into the bins — an overbought RSI or an upper-Bollinger-band tag is the INTENDED entry condition (mean-reversion into your range), NOT a disqualifier. Penalizing "overbought = poor entry timing" is the wrong polarity for this strategy.
+- The real entry risk is the opposite: price dumps hard straight through the range without recovering (deep IL, no fees). The active entry preset's 15m-bullish trend filter + close-vs-supertrend veto guard that — do not re-litigate it with a blanket overbought penalty.
+
 DEPLOY RULES:
 - COMPOUNDING: Use the deploy amount from the goal EXACTLY. Do NOT default to a smaller number.
 - strategy = ${config.strategy.strategy} — always use this exact value, never change it.
