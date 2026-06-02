@@ -145,6 +145,19 @@ export const config = {
     preferredKolNames: gmgnArray("preferredKolNames", "gmgnPreferredKolNames", []),
     dumpKolNames: gmgnArray("dumpKolNames", "gmgnDumpKolNames", []),
     indicatorFilter: gmgnValue("indicatorFilter", "gmgnIndicatorFilter", true),
+    // Indicator candle source: "meridian" (default, existing endpoint) | "gmgn" (compute
+    // from GMGN klines, auto-falling back to meridian on any failure).
+    indicatorSource: gmgnValue("indicatorSource", "gmgnIndicatorSource", "meridian"),
+    indicatorParams: {
+      supertrendPeriod: 10,
+      supertrendMultiplier: 3,
+      bollingerPeriod: 20,
+      bollingerStdDev: 2,
+      fibLookbackBars: 55,
+      klineCacheTtlSec: 30,
+      klineLimit: 1000, // 1m bars fetched per mint; GMGN caps at 1000/call (~66 closed 15m bars). Matches DEFAULT_INDICATOR_PARAMS.
+      ...(gmgnUserConfig.indicatorParams || {}),
+    },
     indicatorInterval: gmgnValue("indicatorInterval", "gmgnIndicatorInterval", "15_MINUTE"),
     indicatorRules: (() => {
       const r = gmgnUserConfig.indicatorRules || {};
