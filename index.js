@@ -818,7 +818,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
   const pnlPollMs = Math.max(1, Number(config.pnl.pollIntervalSec ?? 3)) * 1000;
   let _pnlPollBusy = false;
   const pnlPollInterval = setInterval(async () => {
-    if (_managementBusy || _screeningBusy || _pnlPollBusy) return;
+    if (_managementBusy || _pnlPollBusy) return;
     if (getTrackedPositions(true).length === 0) return;
     _pnlPollBusy = true;
     try {
@@ -1539,7 +1539,7 @@ function refreshPrompt() {
 }
 
 async function drainTelegramQueue() {
-  while (_telegramQueue.length > 0 && !_managementBusy && !_screeningBusy && !busy) {
+  while (_telegramQueue.length > 0 && !_managementBusy && !busy) {
     const queued = _telegramQueue.shift();
     await telegramHandler(queued);
   }
@@ -1560,7 +1560,7 @@ async function telegramHandler(msg) {
     await showSettingsMenu().catch((e) => sendMessage(`Settings error: ${e.message}`).catch(() => {}));
     return;
   }
-  if (_managementBusy || _screeningBusy || busy) {
+  if (_managementBusy || busy) {
     if (_telegramQueue.length < 5) {
       _telegramQueue.push(msg);
       sendMessage(`⏳ Queued (${_telegramQueue.length} in queue): "${text.slice(0, 60)}"`).catch(() => {});
