@@ -1,5 +1,6 @@
 import { config } from "../config.js";
 import { log } from "../logger.js";
+import { buildLocalPayload, fetchCandlesFromDexScreener } from "./gmgn-indicators.js";
 
 const DEFAULT_INTERVALS = ["5_MINUTE"];
 const DEFAULT_CANDLES = 298;
@@ -14,7 +15,7 @@ function getHeaders() {
   return headers;
 }
 
-function normalizeIntervals(intervals) {
+export function normalizeIntervals(intervals) {
   const list = Array.isArray(intervals) ? intervals : DEFAULT_INTERVALS;
   return list
     .map((value) => String(value || "").trim().toUpperCase())
@@ -62,6 +63,10 @@ function evaluatePreset(side, preset, payload) {
   const rsi = summary.rsi;
   const isBullish = summary.supertrendDirection === "bullish";
   const isBearish = summary.supertrendDirection === "bearish";
+  const priceBelowST =
+    close != null &&
+    summary.supertrendValue != null &&
+    close < summary.supertrendValue;
   const crossedUp = (level) =>
     level != null &&
     close != null &&
@@ -77,17 +82,25 @@ function evaluatePreset(side, preset, payload) {
 
   switch (preset) {
     case "supertrend_break":
-      return side === "entry"
-        ? {
-            confirmed: summary.supertrendBreakUp || (isBullish && close != null && summary.supertrendValue != null && close >= summary.supertrendValue),
-            reason: summary.supertrendBreakUp ? "Supertrend flipped bullish" : "Price is above bullish Supertrend",
-            signal: summary,
-          }
-        : {
-            confirmed: summary.supertrendBreakDown || (isBearish && close != null && summary.supertrendValue != null && close <= summary.supertrendValue),
-            reason: summary.supertrendBreakDown ? "Supertrend flipped bearish" : "Price is below bearish Supertrend",
+      if (side === "entry") {
+        if (priceBelowST) {
+          return {
+            confirmed: false,
+            reason: `Defensive veto: close ${close} < supertrend ${summary.supertrendValue} (direction=${summary.supertrendDirection}, breakUp=${summary.supertrendBreakUp})`,
             signal: summary,
           };
+        }
+        return {
+          confirmed: summary.supertrendBreakUp || (isBullish && close != null && summary.supertrendValue != null && close >= summary.supertrendValue),
+          reason: summary.supertrendBreakUp ? "Supertrend flipped bullish" : "Price is above bullish Supertrend",
+          signal: summary,
+        };
+      }
+      return {
+        confirmed: summary.supertrendBreakDown || (isBearish && close != null && summary.supertrendValue != null && close <= summary.supertrendValue),
+        reason: summary.supertrendBreakDown ? "Supertrend flipped bearish" : "Price is below bearish Supertrend",
+        signal: summary,
+      };
     case "rsi_reversal":
       return side === "entry"
         ? {
@@ -113,6 +126,13 @@ function evaluatePreset(side, preset, payload) {
             signal: summary,
           };
     case "rsi_plus_supertrend":
+      if (side === "entry" && priceBelowST) {
+        return {
+          confirmed: false,
+          reason: `Defensive veto: close ${close} < supertrend ${summary.supertrendValue}`,
+          signal: summary,
+        };
+      }
       return side === "entry"
         ? {
             confirmed:
@@ -211,6 +231,72 @@ function evaluatePreset(side, preset, payload) {
   }
 }
 
+// Pure evaluator for the supertrend_bb_extension composite entry preset.
+// Checks 5m (bands + veto) and 15m (trend filter) together — different conditions per interval.
+// Confirms when:
+//   1. 15m supertrend is bullish (trend filter — pullback will recover)
+//   2. 5m close is at/above supertrend (defensive veto)
+//   3. 5m close still above floor band (middle/lower — hasn't broken down yet)
+//   4. Price tagged the tag band (upper/middle) within last N closed bars (catch the extension)
+// Degrades to single-bar check when no recent series available (Meridian API fallback).
+export function evaluateSupertrendBbExtension(payload5m, payload15m, params) {
+  const s5 = buildSignalSummary(payload5m);
+  const s15 = buildSignalSummary(payload15m);
+  const lookbackBars = Math.max(1, Math.floor(params.lookbackBars) || 3);
+  const tagBand = params.tagBand === "middle" ? "middle" : "upper";
+  const floorBand = params.floorBand === "lower" ? "lower" : "middle";
+  const base = { signal5m: s5, signal15m: s15, degraded: false };
+
+  // 1. HTF trend filter
+  if (s15.supertrendDirection !== "bullish") {
+    return { ...base, confirmed: false, reason: `15m supertrend ${s15.supertrendDirection} (need bullish)` };
+  }
+  // 2. 5m ST bullish check
+  if (s5.supertrendDirection !== "bullish") {
+    return { ...base, confirmed: false, reason: `5m supertrend ${s5.supertrendDirection} (need bullish)` };
+  }
+  // 3. Defensive veto — 5m close >= supertrend
+  if (s5.close != null && s5.supertrendValue != null && s5.close < s5.supertrendValue) {
+    return { ...base, confirmed: false, reason: `Veto: 5m close ${s5.close} < supertrend ${s5.supertrendValue}` };
+  }
+  // 4. Floor — latest 5m close still above floor band
+  const floorLevel = floorBand === "lower" ? s5.lowerBand : s5.middleBand;
+  if (s5.close == null || floorLevel == null || s5.close < floorLevel) {
+    return { ...base, confirmed: false, reason: `Below floor: 5m close ${s5.close} < ${floorBand} band ${floorLevel}` };
+  }
+  // 5. Extension — price high >= tag band within the lookback window
+  const recent = Array.isArray(payload5m?.recent) ? payload5m.recent : null;
+  let tagged = false;
+  let degraded = false;
+  if (recent && recent.length > 0) {
+    const lookbackWindow = recent.slice(-lookbackBars);
+    tagged = lookbackWindow.some((bar) => {
+      const level = tagBand === "middle" ? bar.bbMiddle : bar.bbUpper;
+      return level != null && bar.high != null && bar.high >= level;
+    });
+  } else {
+    degraded = true;
+    const tagLevel = tagBand === "middle" ? s5.middleBand : s5.upperBand;
+    const rawHigh = payload5m?.latest?.candle?.high;
+    const high5 = rawHigh != null ? safeNum(rawHigh) : s5.close;
+    tagged = tagLevel != null && high5 != null && high5 >= tagLevel;
+  }
+  if (!tagged) {
+    return {
+      ...base, degraded, confirmed: false,
+      reason: degraded
+        ? `Degrade: no single-bar tag of ${tagBand} band`
+        : `No ${tagBand}-band tag in last ${lookbackBars} bars`,
+    };
+  }
+  return {
+    ...base, degraded, confirmed: true,
+    reason: degraded
+      ? `Degraded confirm: 15m bullish + 5m single-bar ${tagBand}-band tag above floor`
+      : `15m bullish + 5m tagged ${tagBand} band (last ${lookbackBars} bars), still above ${floorBand}`,
+  };
+}
+
 export async function fetchChartIndicatorsForMint(
   mint,
   {
@@ -244,6 +330,81 @@ export async function fetchChartIndicatorsForMint(
   return payload;
 }
 
+/**
+ * Fetch chart indicators with automatic fallback to local computation
+ * via DexScreener klines + gmgn-indicators.js local ST/BB/RSI.
+ */
+async function fetchIndicatorsWithFallback(mint, interval, opts = {}) {
+  try {
+    const payload = await fetchChartIndicatorsForMint(mint, { interval, ...opts });
+    return payload;
+  } catch (hiveErr) {
+    log("indicators_info", `HiveMind unavailable for ${mint.slice(0, 8)} ${interval}, trying local: ${hiveErr.message}`);
+    try {
+      const candles = await fetchCandlesFromDexScreener(
+        mint, interval, opts.candles || config.indicators.candles || DEFAULT_CANDLES,
+      );
+      if (candles.length < 50) throw new Error(`Only ${candles.length} candles from DexScreener`);
+      return buildLocalPayload(candles, interval, {
+        rsiPeriod: config.indicators.rsiLength || 2,
+        stPeriod: 10,
+        stMultiplier: 3,
+      });
+    } catch (localErr) {
+      throw new Error(`HiveMind+local both failed: ${hiveErr.message} / ${localErr.message}`);
+    }
+  }
+}
+
+// Cross-interval confirmation for supertrend_bb_extension composite entry.
+// Fetches 5m (bands + veto) and 15m (trend filter) payloads together — the
+// per-interval loop in confirmIndicatorPreset can't express different conditions per interval.
+export async function confirmSupertrendBbExtension({ mint, refresh = false }) {
+  const params = {
+    lookbackBars: Number(config.indicators.extensionLookbackBars) || 6,
+    tagBand: String(config.indicators.extensionTagBand || "upper").toLowerCase(),
+    floorBand: String(config.indicators.extensionFloorBand || "middle").toLowerCase(),
+  };
+  const results = [];
+  let p5 = null;
+  let p15 = null;
+  for (const interval of ["5_MINUTE", "15_MINUTE"]) {
+    try {
+      const payload = await fetchIndicatorsWithFallback(mint, interval, { refresh });
+      if (interval === "5_MINUTE") p5 = payload; else p15 = payload;
+      results.push({
+        interval, ok: true, confirmed: null, reason: null,
+        signal: buildSignalSummary(payload), latest: payload?.latest || null,
+      });
+    } catch (error) {
+      log("indicators_warn", `BB-extension fetch failed for ${mint.slice(0, 8)} ${interval}: ${error.message}`);
+      results.push({ interval, ok: false, confirmed: null, reason: error.message, signal: null, latest: null });
+    }
+  }
+
+  if (!p5 || !p15) {
+    return {
+      enabled: true, confirmed: true, skipped: true,
+      preset: "supertrend_bb_extension", side: "entry",
+      reason: "All data sources unavailable; falling back to existing logic",
+      intervals: results,
+    };
+  }
+
+  const evaln = evaluateSupertrendBbExtension(p5, p15, params);
+  for (const r of results) {
+    if (!r.ok) continue;
+    r.confirmed = r.interval === "15_MINUTE"
+      ? evaln.signal15m.supertrendDirection === "bullish"
+      : evaln.confirmed;
+  }
+  return {
+    enabled: true, confirmed: !!evaln.confirmed, skipped: false,
+    preset: "supertrend_bb_extension", side: "entry",
+    reason: evaln.reason, intervals: results,
+  };
+}
+
 export async function confirmIndicatorPreset({
   mint,
   side,
@@ -255,6 +416,10 @@ export async function confirmIndicatorPreset({
     return { enabled: false, confirmed: true, reason: "Indicators disabled or not configured", intervals: [] };
   }
 
+  if (side === "entry" && preset === "supertrend_bb_extension") {
+    return await confirmSupertrendBbExtension({ mint, refresh });
+  }
+
   const targets = normalizeIntervals(intervals);
   if (targets.length === 0) {
     return { enabled: false, confirmed: true, reason: "No indicator intervals configured", intervals: [] };
@@ -263,7 +428,7 @@ export async function confirmIndicatorPreset({
   const results = [];
   for (const interval of targets) {
     try {
-      const payload = await fetchChartIndicatorsForMint(mint, { interval, refresh });
+      const payload = await fetchIndicatorsWithFallback(mint, interval, { refresh });
       const evaluation = evaluatePreset(side, preset, payload);
       results.push({
         interval,
