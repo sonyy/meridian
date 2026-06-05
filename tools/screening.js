@@ -802,8 +802,9 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       if (!confirmation || confirmation.confirmed) return true;
       pushFilteredReason(filteredOut, pool, `indicator reject: ${confirmation.reason}`);
       log("screening", `Indicator rejected ${pool.name} (${pool.pool.slice(0, 8)}): ${confirmation.reason}`);
-      const mint = pool.token_x?.address || pool.pool;
-      sendHTML(`❌ Indicator reject <a href="https://gmgn.ai/sol/token/${mint}">${pool.name}</a>: ${confirmation.reason}`).catch(() => {});
+      const mint = pool.token_x?.address;
+      const nameTag = mint ? `<a href="https://gmgn.ai/sol/token/${mint}">${pool.name}</a>` : pool.name;
+      sendHTML(`❌ Indicator reject ${nameTag}: ${confirmation.reason}`).catch(() => {});
       return false;
     });
     eligible.splice(0, eligible.length, ...confirmedEligible);
