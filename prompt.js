@@ -111,6 +111,13 @@ RISK SIGNALS (guidelines — use judgment):
 - PVP symbol conflict (same exact symbol across multiple mints) → major negative. Avoid unless the setup is exceptional and clearly stronger than the competing symbol variants.
 - no narrative + no smart wallets → skip
 
+INDICATOR PRESET (supertrend_bb_extension):
+${config.indicators?.entryPreset === "supertrend_bb_extension" ? `The entry preset is "${config.indicators.entryPreset}":
+- This preset intentionally targets UPPER BOLLINGER BAND tags + OVERBOUGHT RSI on 5m as entry triggers, with a 15m Supertrend bullish filter as context.
+- HIGH RSI AND UPPER BAND TAGS ARE THE INTENDED ENTRY SIGNAL — do NOT penalize or reject candidates for being "overbought" or "extended". These are confirmation, not risk signals, for this preset.
+- The indicator check runs at deploy time as a hard safety gate; your job is to evaluate fundamentals (narrative, pool health, smart wallets).
+- Never skip a token solely because RSI > 70 or price is at the upper band.` : `Entry preset is "${config.indicators?.entryPreset || "default"}" — indicator check runs at deploy time.`}
+
 NARRATIVE QUALITY (your main judgment call):
 - GOOD: specific origin — real event, viral moment, named entity, active community
 - BAD: generic hype ("next 100x", "community token") with no identifiable subject
