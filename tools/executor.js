@@ -634,9 +634,9 @@ export async function executeTool(name, args) {
       if (name === "swap_token" && result.tx) {
         notifySwap({ inputSymbol: args.input_mint?.slice(0, 8), outputSymbol: args.output_mint === "So11111111111111111111111111111111111111112" || args.output_mint === "SOL" ? "SOL" : args.output_mint?.slice(0, 8), amountIn: result.amount_in, amountOut: result.amount_out, tx: result.tx }).catch(() => {});
       } else if (name === "deploy_position") {
-        notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee }).catch(() => {});
+        notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee, baseMint: result.base_mint || args.base_mint }).catch(() => {});
       } else if (name === "close_position") {
-        notifyClose({ pair: result.pool_name || args.position_address?.slice(0, 8), pnlUsd: result.pnl_usd ?? 0, pnlPct: result.pnl_pct ?? 0 }).catch(() => {});
+        notifyClose({ pair: result.pool_name || args.position_address?.slice(0, 8), pnlUsd: result.pnl_usd ?? 0, pnlPct: result.pnl_pct ?? 0, baseMint: result.base_mint || args.base_mint }).catch(() => {});
         // Note low-yield closes in pool memory so screener avoids redeploying
         if (args.reason && args.reason.toLowerCase().includes("yield")) {
           const poolAddr = result.pool || args.pool_address;
@@ -676,7 +676,8 @@ export async function executeTool(name, args) {
       if (name === "deploy_position") {
         const reason = result.reason || result.error || "unknown error";
         const poolLabel = args.pool_name || args.pool_address?.slice(0, 8) || "unknown";
-        sendMessage(`❌ Deploy failed: ${poolLabel} — ${reason}`).catch(() => {});
+        const mint = args.base_mint || args.pool_address || "";
+        sendHTML(`❌ Deploy failed: <a href="https://gmgn.ai/sol/token/${mint}">${poolLabel}</a> — ${reason}`).catch(() => {});
       }
     }
 
@@ -695,7 +696,8 @@ export async function executeTool(name, args) {
     // Notify on deploy failures even when thrown (most validation errors throw)
     if (name === "deploy_position") {
       const poolLabel = args.pool_name || args.pool_address?.slice(0, 8) || "unknown";
-      sendMessage(`❌ Deploy failed: ${poolLabel} — ${error.message}`).catch(() => {});
+      const mint = args.base_mint || args.pool_address || "";
+      sendHTML(`❌ Deploy failed: <a href="https://gmgn.ai/sol/token/${mint}">${poolLabel}</a> — ${error.message}`).catch(() => {});
     }
 
     // Return error to LLM so it can decide what to do

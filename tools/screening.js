@@ -3,7 +3,7 @@ import { isBlacklisted } from "../token-blacklist.js";
 import { isDevBlocked, getBlockedDevs } from "../dev-blocklist.js";
 import { log } from "../logger.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
-import { sendMessage } from "../telegram.js";
+import { sendMessage, sendHTML } from "../telegram.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { discoverGmgnPools } from "./gmgn.js";
 
@@ -802,7 +802,8 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       if (!confirmation || confirmation.confirmed) return true;
       pushFilteredReason(filteredOut, pool, `indicator reject: ${confirmation.reason}`);
       log("screening", `Indicator rejected ${pool.name} (${pool.pool.slice(0, 8)}): ${confirmation.reason}`);
-      sendMessage(`❌ Indicator reject ${pool.name}: ${confirmation.reason}`).catch(() => {});
+      const mint = pool.token_x?.address || pool.pool;
+      sendHTML(`❌ Indicator reject <a href="https://gmgn.ai/sol/token/${mint}">${pool.name}</a>: ${confirmation.reason}`).catch(() => {});
       return false;
     });
     eligible.splice(0, eligible.length, ...confirmedEligible);
