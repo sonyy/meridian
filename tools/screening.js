@@ -924,9 +924,10 @@ function fix(n, decimals) {
   return value != null ? Number(value.toFixed(decimals)) : null;
 }
 
-function pushFilteredReason(list, pool, reason) {
+function pushFilteredReason(list, pool, reason, stage = 6) {
   if (!list || !pool) return;
   list.push({
+    stage,
     name: pool.name || `${pool.base?.symbol || "?"}-${pool.quote?.symbol || "?"}`,
     reason,
   });

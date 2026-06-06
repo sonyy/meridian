@@ -426,6 +426,7 @@ After executing, write a brief one-line result per position.
 }
 
 export async function runScreeningCycle({ silent = false } = {}) {
+  reloadScreeningThresholds();
   if (_screeningBusy) {
     log("cron", "Screening skipped — previous cycle still running");
     if (!silent && telegramEnabled()) {
@@ -1078,7 +1079,7 @@ function buildGmgnFunnelReport(stageCounts, allFiltered = [], { fromStage = 1 } 
     if (!byStage[key]) byStage[key] = [];
     byStage[key].push(`${f.name}: ${f.reason}`);
   }
-  const stageLabels = { s2: "S2 info", s3: "S3 pool", s4: "S4 indicators", s5: "S5 pick" };
+  const stageLabels = { s1: "S1 rank", s2: "S2 info", s3: "S3 pool", s4: "S4 indicators", s5: "S5 pick", s6: "S6 screening" };
   const details = Object.entries(byStage)
     .map(([key, items]) => `${stageLabels[key] || key}:\n${items.map(r => `  • ${r}`).join("\n")}`)
     .join("\n");
