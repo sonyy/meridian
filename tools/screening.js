@@ -238,10 +238,16 @@ async function applyVolatilityTimeframe(rawPools, sourceTimeframe) {
 }
 
 async function searchAssetsBySymbol(symbol) {
-  const res = await fetch(`${DATAPI_JUP}/assets/search?query=${encodeURIComponent(symbol)}`);
-  if (!res.ok) throw new Error(`assets/search ${res.status}`);
-  const data = await res.json();
-  return Array.isArray(data) ? data : [data];
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(`${DATAPI_JUP}/assets/search?query=${encodeURIComponent(symbol)}`, { signal: controller.signal });
+    if (!res.ok) throw new Error(`assets/search ${res.status}`);
+    const data = await res.json();
+    return Array.isArray(data) ? data : [data];
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function enrichDiscordSignalLaunchpads(rawPools) {
@@ -294,11 +300,17 @@ async function enrichDiscordSignalLaunchpads(rawPools) {
 
 async function findRivalPool(mint) {
   const url = `https://dlmm.datapi.meteora.ag/pools?query=${encodeURIComponent(mint)}&sort_by=${encodeURIComponent("tvl:desc")}&filter_by=${encodeURIComponent(`tvl>${PVP_MIN_ACTIVE_TVL}`)}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`rival pool search ${res.status}`);
-  const data = await res.json();
-  const pools = Array.isArray(data?.data) ? data.data : [];
-  return pools.find((pool) => pool?.token_x?.address === mint || pool?.token_y?.address === mint) || null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) throw new Error(`rival pool search ${res.status}`);
+    const data = await res.json();
+    const pools = Array.isArray(data?.data) ? data.data : [];
+    return pools.find((pool) => pool?.token_x?.address === mint || pool?.token_y?.address === mint) || null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function enrichPvpRisk(pools) {
@@ -553,6 +565,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   const discovery = source === "gmgn"
     ? await discoverGmgnPools({ limit: Math.max(limit, config.gmgn.enrichLimit || 20) })
     : await discoverPools({ page_size: 50 });
+  log("gmgn", `getTopCandidates: discoverGmgnPools returned ${discovery?.pools?.length ?? 0} pools`);
   let { pools } = discovery;
   const filteredOut = Array.isArray(discovery.filtered_examples) ? [...discovery.filtered_examples] : [];
 
@@ -577,7 +590,12 @@ export async function getTopCandidates({ limit = 10 } = {}) {
 
   // Exclude pools where the wallet already has an open position
   const { getMyPositions } = await import("./dlmm.js");
-  const { positions } = await getMyPositions();
+  log("gmgn", `getTopCandidates: importing dlmm.js done, calling getMyPositions...`);
+  const { positions } = await Promise.race([
+    getMyPositions(),
+    new Promise((resolve) => setTimeout(() => resolve({ positions: [] }), 15000)),
+  ]);
+  log("gmgn", `getTopCandidates: getMyPositions returned ${positions?.length ?? "?"} positions`);
   const occupiedPools = new Set(positions.map((p) => p.pool));
   const occupiedMints = new Set(positions.map((p) => p.base_mint).filter(Boolean));
   const minTvl = source === "gmgn"
@@ -643,7 +661,12 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     .slice(0, limit);
 
   if (config.screening.avoidPvpSymbols && eligible.length > 0) {
-    await enrichPvpRisk(eligible);
+    log("gmgn", `getTopCandidates: enriching PVP risk for ${eligible.length} pools...`);
+    await Promise.race([
+      enrichPvpRisk(eligible),
+      new Promise((resolve) => setTimeout(resolve, 30000)),
+    ]);
+    log("gmgn", `getTopCandidates: PVP enrichment done`);
     if (config.screening.blockPvpSymbols) {
       const before = eligible.length;
       const pvpRemoved = eligible.filter((p) => p.is_pvp);
@@ -715,6 +738,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     }
   }
 
+  log("gmgn", `getTopCandidates: returning ${eligible.length} candidates`);
   return {
     candidates: eligible,
     total_screened: discovery.total ?? pools.length,

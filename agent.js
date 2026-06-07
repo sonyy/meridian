@@ -149,10 +149,25 @@ function isToolChoiceRequiredError(error) {
  * @param {number} maxSteps - Safety limit on iterations (default 20)
  * @returns {string} - The agent's final text response
  */
+function withTimeout(promise, ms) {
+  let timer = null;
+  return Promise.race([
+    promise,
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve(null), ms);
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
 export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHistory = [], agentType = "GENERAL", model = null, maxOutputTokens = null, options = {}) {
   const { interactive = false, onToolStart = null, onToolFinish = null } = options;
   // Build dynamic system prompt with current portfolio state
-  const [portfolio, positions] = await Promise.all([getWalletBalances(), getMyPositions()]);
+  const [portfolio, positions] = await Promise.all([
+    withTimeout(getWalletBalances(), 15000),
+    withTimeout(getMyPositions(), 15000),
+  ]);
   const stateSummary = getStateSummary();
   const lessons = getLessonsForPrompt({ agentType });
   const perfSummary = getPerformanceSummary();
@@ -187,15 +202,17 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
     try {
       const activeModel = model || DEFAULT_MODEL;
 
-      // Retry up to 3 times on transient provider errors (502, 503, 529)
-      const FALLBACK_MODEL = "stepfun/step-3.5-flash:free";
+      // Multi-model fallback chain on transient provider errors (502, 503, 529)
+      const fallbackModels = config.llm.fallbackModels || [];
+      const modelChain = [activeModel, ...fallbackModels];
+      let modelIdx = 0;
+      let usedModel = modelChain[0];
       let response;
-      let usedModel = activeModel;
       // Force a tool call on step 0 for action intents — prevents the model from inventing deploy/close outcomes
       const ACTION_INTENTS = /\b(deploy|open|add liquidity|close|exit|withdraw|claim|swap|block|unblock)\b/i;
       let toolChoice = (step === 0 && (ACTION_INTENTS.test(goal) || mustUseRealTool)) ? "required" : "auto";
 
-      for (let attempt = 0; attempt < 3; attempt++) {
+      for (let attempt = 0; attempt < Math.max(3, modelChain.length + 1); attempt++) {
         try {
           response = await client.chat.completions.create({
             model: usedModel,
@@ -219,17 +236,32 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             attempt -= 1;
             continue;
           }
+          const httpStatus = error.status || (error.message ? parseInt(error.message) : 0);
+          if (httpStatus === 404 || httpStatus === 502 || httpStatus === 503 || httpStatus === 529) {
+            modelIdx++;
+            if (modelIdx < modelChain.length) {
+              usedModel = modelChain[modelIdx];
+              log("agent", `Fallback [${modelIdx}/${modelChain.length - 1}]: caught error ${httpStatus}, switching to ${usedModel}`);
+              continue;
+            } else {
+              const wait = (attempt + 1) * 5000;
+              log("agent", `Caught error ${httpStatus}, retrying ${usedModel} in ${wait / 1000}s — all ${modelChain.length} models tried`);
+              await new Promise((r) => setTimeout(r, wait));
+              continue;
+            }
+          }
           throw error;
         }
         if (response.choices?.length) break;
         const errCode = response.error?.code;
-        if (errCode === 502 || errCode === 503 || errCode === 529) {
-          const wait = (attempt + 1) * 5000;
-          if (attempt === 1 && usedModel !== FALLBACK_MODEL) {
-            usedModel = FALLBACK_MODEL;
-            log("agent", `Switching to fallback model ${FALLBACK_MODEL}`);
+        if (errCode === 404 || errCode === 502 || errCode === 503 || errCode === 529) {
+          modelIdx++;
+          if (modelIdx < modelChain.length) {
+            usedModel = modelChain[modelIdx];
+            log("agent", `Fallback [${modelIdx}/${modelChain.length - 1}]: switching to ${usedModel}`);
           } else {
-            log("agent", `Provider error ${errCode}, retrying in ${wait / 1000}s (attempt ${attempt + 1}/3)`);
+            const wait = (attempt + 1) * 5000;
+            log("agent", `Provider error ${errCode}, retrying ${usedModel} in ${wait / 1000}s — all ${modelChain.length} models tried`);
             await new Promise((r) => setTimeout(r, wait));
           }
         } else {

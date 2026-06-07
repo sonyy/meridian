@@ -4,15 +4,19 @@ const DATAPI_BASE = "https://datapi.jup.ag/v1";
  * Get the narrative/story behind a token from Jupiter ChainInsight.
  * Useful for understanding if a token has a real community/theme vs nothing.
  */
+const FETCH_TIMEOUT = 15000;
+
 export async function getTokenNarrative({ mint }) {
-  const res = await fetch(`${DATAPI_BASE}/chaininsight/narrative/${mint}`);
-  if (!res.ok) throw new Error(`Narrative API error: ${res.status}`);
-  const data = await res.json();
-  return {
-    mint,
-    narrative: data.narrative || null,
-    status: data.status,
-  };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT);
+  try {
+    const res = await fetch(`${DATAPI_BASE}/chaininsight/narrative/${mint}`, { signal: ctrl.signal });
+    if (!res.ok) throw new Error(`Narrative API error: ${res.status}`);
+    const data = await res.json();
+    return { mint, narrative: data.narrative || null, status: data.status };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -21,7 +25,14 @@ export async function getTokenNarrative({ mint }) {
  */
 export async function getTokenInfo({ query }) {
   const url = `${DATAPI_BASE}/assets/search?query=${encodeURIComponent(query)}`;
-  const res = await fetch(url);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT);
+  let res;
+  try {
+    res = await fetch(url, { signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) throw new Error(`Token search API error: ${res.status}`);
   const data = await res.json();
   const tokens = Array.isArray(data) ? data : [data];
