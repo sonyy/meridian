@@ -461,7 +461,8 @@ export function stopPolling() {
 }
 
 // ─── Notification helpers ────────────────────────────────────────
-export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, rangeCoverage, binStep, baseFee, baseMint }) {
+export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, rangeCoverage, binStep, baseFee }) {
+  if (hasActiveLiveMessage()) return;
   const priceStr = priceRange
     ? `Price range: ${priceRange.min < 0.0001 ? priceRange.min.toExponential(3) : priceRange.min.toFixed(6)} – ${priceRange.max < 0.0001 ? priceRange.max.toExponential(3) : priceRange.max.toFixed(6)}\n`
     : "";
@@ -471,9 +472,8 @@ export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, 
   const poolStr = (binStep || baseFee)
     ? `Bin step: ${binStep ?? "?"}  |  Base fee: ${baseFee != null ? baseFee + "%" : "?"}\n`
     : "";
-  const pairLink = baseMint ? `<a href="https://gmgn.ai/sol/token/${baseMint}">${pair}</a>` : pair;
   await sendHTML(
-    `✅ <b>Deployed</b> ${pairLink}\n` +
+    `✅ <b>Deployed</b> ${pair}\n` +
     `Amount: ${amountSol} SOL\n` +
     priceStr +
     coverageStr +
@@ -483,11 +483,11 @@ export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, 
   );
 }
 
-export async function notifyClose({ pair, pnlUsd, pnlPct, baseMint }) {
+export async function notifyClose({ pair, pnlUsd, pnlPct }) {
+  if (hasActiveLiveMessage()) return;
   const sign = pnlUsd >= 0 ? "+" : "";
-  const pairLink = baseMint ? `<a href="https://gmgn.ai/sol/token/${baseMint}">${pair}</a>` : pair;
   await sendHTML(
-    `🔒 <b>Closed</b> ${pairLink}\n` +
+    `🔒 <b>Closed</b> ${pair}\n` +
     `PnL: ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}${(pnlPct ?? 0).toFixed(2)}%)`
   );
 }
@@ -506,17 +506,6 @@ export async function notifyOutOfRange({ pair, minutesOOR }) {
   await sendHTML(
     `⚠️ <b>Out of Range</b> ${pair}\n` +
     `Been OOR for ${minutesOOR} minutes`
-  );
-}
-
-export async function notifyNearThreshold({ pair, pnlPct, thresholdType, thresholdValue, distance }) {
-  if (hasActiveLiveMessage()) return;
-  const emoji = thresholdType === "stop_loss" ? "🛑" : thresholdType === "take_profit" ? "🎯" : "⚠️";
-  const label = thresholdType === "stop_loss" ? "Stop loss" : thresholdType === "take_profit" ? "Take profit" : "Threshold";
-  await sendHTML(
-    `${emoji} <b>Near ${label}</b> ${pair}
-` +
-    `PnL: ${pnlPct != null ? pnlPct.toFixed(2) + "%" : "?"} | ${label}: ${thresholdValue}% | ${distance != null ? distance.toFixed(2) + "% away" : ""}`
   );
 }
 

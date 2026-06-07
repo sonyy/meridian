@@ -29,6 +29,7 @@ import { REPO_ROOT, repoPath } from "../repo-root.js";
 import { normalizeTimeframe, scaleScreeningToTimeframe } from "../screening-scales.js";
 
 const USER_CONFIG_PATH = repoPath("user-config.json");
+const GMGN_CONFIG_PATH = repoPath("gmgn-config.json");
 const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
 const MIN_VOLATILITY_TIMEFRAME = "30m";
 const TIMEFRAME_MINUTES = {
@@ -487,12 +488,31 @@ const toolMap = {
       return { success: false, unknown, reason };
     }
 
-    let userConfig = {};
-    if (fs.existsSync(USER_CONFIG_PATH)) {
-      try {
-        userConfig = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"));
-      } catch (error) {
-        return { success: false, error: `Invalid user-config.json: ${error.message}`, reason };
+    // Auto-scale fee/volume when timeframe changes (unless user set them explicitly in same call).
+    if (applied.timeframe != null && applied.minFeeActiveTvlRatio == null && applied.minVolume == null) {
+      const tf = normalizeTimeframe(applied.timeframe);
+      applied.timeframe = tf;
+      const scaled = scaleScreeningToTimeframe(tf);
+      applied.minFeeActiveTvlRatio = scaled.minFeeActiveTvlRatio;
+      applied.minVolume = scaled.minVolume;
+      applied._timeframeScaled = true;
+      log("config", `timeframe ${tf} → auto-scaled minFeeActiveTvlRatio=${scaled.minFeeActiveTvlRatio}, minVolume=${scaled.minVolume}`);
+    }
+
+    // Apply to live config immediately
+    for (const [key, val] of Object.entries(applied)) {
+      if (key.startsWith("_")) continue;
+      const [section, field, third] = CONFIG_MAP[key] || [];
+      const isNestedField = typeof third === "string"; // string = nested subfield, array = persistPath
+      if (isNestedField) {
+        if (!config[section][field] || typeof config[section][field] !== "object") config[section][field] = {};
+        const before = config[section][field][third];
+        config[section][field][third] = val;
+        log("config", `update_config: config.${section}.${field}.${third} ${redactConfigValue(key, before)} → ${redactConfigValue(key, val)}`);
+      } else {
+        const before = config[section][field];
+        config[section][field] = val;
+        log("config", `update_config: config.${section}.${field} ${redactConfigValue(key, before)} → ${redactConfigValue(key, val)} (verify: ${redactConfigValue(key, config[section][field])})`);
       }
     }
 
@@ -534,7 +554,19 @@ const toolMap = {
 
     for (const [key, val] of Object.entries(applied)) {
       if (key.startsWith("_")) continue;
-      const persistPath = CONFIG_MAP[key]?.[2];
+      const [section, field, third] = CONFIG_MAP[key] || [];
+      const persistPath = Array.isArray(third) ? third : null;
+      const nestedField = typeof third === "string" ? third : null;
+      if (section === "gmgn") {
+        if (nestedField) {
+          if (!gmgnConfig[field] || typeof gmgnConfig[field] !== "object") gmgnConfig[field] = {};
+          gmgnConfig[field][nestedField] = val;
+        } else {
+          gmgnConfig[field] = val;
+        }
+        wroteGmgnConfig = true;
+        continue;
+      }
       if (Array.isArray(persistPath) && persistPath.length > 0) {
         let target = userConfig;
         for (const part of persistPath.slice(0, -1)) {

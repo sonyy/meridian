@@ -73,11 +73,6 @@ export async function getTokenInfo({ query }) {
     stats_24h_net_buyers: t.stats24h ? t.stats24h.numNetBuyers : null, // keep only net buyer direction
   }));
 
-  // Refine the primary match's fee figure from GMGN (the gate value consumers read).
-  if (results[0]?.mint) {
-    results[0].global_fees_sol = await resolveGlobalFeesSol(results[0].mint, tokens[0]?.fees);
-  }
-
   return { found: true, query, results };
 }
 

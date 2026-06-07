@@ -81,7 +81,8 @@ The same pool will show much smaller numbers on 5m vs 24h. Adjust your expectati
   timeframe │ fee_active_tvl_ratio │ volume (good pool)
   ──────────┼─────────────────────┼────────────────────
   5m        │ ≥ 0.02% = decent    │ ≥ $500
-  30m       │ ≥ 0.15% = decent    │ ≥ $1k
+  15m       │ ≥ 0.05% = decent    │ ≥ $2k
+  30m       │ ≥ 0.15% = decent    │ ≥ $5k
   1h        │ ≥ 0.2%  = decent    │ ≥ $10k
   2h        │ ≥ 0.4%  = decent    │ ≥ $20k
   4h        │ ≥ 0.8%  = decent    │ ≥ $40k
@@ -107,7 +108,7 @@ HARD RULE (no exceptions):
 - bots > ${config.screening.maxBotHoldersPct}% → already hard-filtered before you see the candidate list.
 
 RISK SIGNALS (guidelines — use judgment):
-- top10 > 60% → concentrated, risky
+- top10 > ${config.screening.maxTop10Pct}% → concentrated, risky
 - PVP symbol conflict (same exact symbol across multiple mints) → major negative. Avoid unless the setup is exceptional and clearly stronger than the competing symbol variants.
 - no narrative + no smart wallets → skip
 
