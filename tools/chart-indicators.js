@@ -313,9 +313,27 @@ export async function fetchChartIndicatorsForMint(
   });
   if (refresh) search.set("refresh", "1");
 
-  return agentMeridianJson(`/chart-indicators/${mint}?${search.toString()}`, {
-    headers: getAgentMeridianHeaders(),
-  });
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15000);
+  try {
+    const res = await fetch(`${getApiBase()}/chart-indicators/${mint}?${search.toString()}`, {
+      headers: getHeaders(),
+      signal: ctrl.signal,
+    });
+    const text = await res.text().catch(() => "");
+    let payload = {};
+    try {
+      payload = text ? JSON.parse(text) : {};
+    } catch {
+      payload = { raw: text };
+    }
+    if (!res.ok) {
+      throw new Error(payload?.error || `chart indicators ${res.status}`);
+    }
+    return payload;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**

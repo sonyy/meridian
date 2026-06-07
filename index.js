@@ -416,7 +416,7 @@ After executing, write a brief one-line result per position.
     _managementBusy = false;
     if (!silent && telegramEnabled()) {
       if (mgmtReport) {
-        if (liveMessage) await liveMessage.finalize(stripThink(mgmtReport)).catch(() => {});
+        if (liveMessage) liveMessage.finalize(stripThink(mgmtReport)).catch(() => {});
         else sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
       }
       for (const p of positions) {
@@ -509,7 +509,15 @@ Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequ
       + (activeStrategy ? `\nSTRATEGY CONTEXT: ${activeStrategy.name} — entry: ${activeStrategy.entry?.condition || "n/a"} | exit: ${activeStrategy.exit?.notes || "n/a"} | best for: ${activeStrategy.best_for}` : "");
 
     // Fetch top candidates, then recon each sequentially with a small delay to avoid 429s
-    const topCandidates = await getTopCandidates({ limit: 10 }).catch(() => null);
+    const topCandidates = await Promise.race([
+      getTopCandidates({ limit: 10 }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("getTopCandidates timed out after 120s")), 120000)),
+    ]).catch((e) => ({ _error: e.message }));
+    if (topCandidates?._error) {
+      screenReport = `Screening failed: ${topCandidates._error}`;
+      return screenReport;
+    }
+    log("cron", `getTopCandidates returned, processing ${topCandidates?.candidates?.length ?? topCandidates?.pools?.length ?? 0} candidates`);
     const candidates = (topCandidates?.candidates || topCandidates?.pools || []).slice(0, 10);
     const earlyFilteredExamples = topCandidates?.filtered_examples || [];
 
@@ -517,9 +525,9 @@ Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequ
     for (const pool of candidates) {
       const mint = pool.base?.mint;
       const [smartWallets, narrative, tokenInfo] = await Promise.allSettled([
-        checkSmartWalletsOnPool({ pool_address: pool.pool }),
-        mint ? getTokenNarrative({ mint }) : Promise.resolve(null),
-        mint ? getTokenInfo({ query: mint }) : Promise.resolve(null),
+        withTimeout(checkSmartWalletsOnPool({ pool_address: pool.pool }), 15000),
+        mint ? withTimeout(getTokenNarrative({ mint }), 15000) : Promise.resolve(null),
+        mint ? withTimeout(getTokenInfo({ query: mint }), 30000) : Promise.resolve(null),
       ]);
       allCandidates.push({
         pool,
@@ -605,7 +613,7 @@ Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequ
 
     // Pre-fetch active_bin for all passing candidates in parallel
     const activeBinResults = await Promise.allSettled(
-      passing.map(({ pool }) => getActiveBin({ pool_address: pool.pool }))
+      passing.map(({ pool }) => withTimeout(getActiveBin({ pool_address: pool.pool }), 15000))
     );
 
     // Build compact candidate blocks
@@ -670,7 +678,7 @@ Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequ
     let deployAttempted = false;
     let deploySucceeded = false;
     let deployFailReason = null;
-    const { content } = await agentLoop(`
+    const { content } = await Promise.race([agentLoop(`
 SCREENING CYCLE
 ${strategyBlock}
 Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL
@@ -748,8 +756,11 @@ IMPORTANT:
           }
           await liveMessage?.toolFinish(name, result, success);
         },
-      });
-    screenReport = content;
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("agentLoop timed out after 7 min")), 420000)),
+    ]);
+    const funnelAppend = buildGmgnFunnelReport(gmgnStageCounts, gmgnAllFiltered, { fromStage: 2 });
+    screenReport = funnelAppend ? `${content}\n\n─────────────\n${funnelAppend}` : content;
     if (/⛔\s*NO DEPLOY/i.test(content)) {
       appendDecision({
         type: "no_deploy",
@@ -778,9 +789,10 @@ IMPORTANT:
     screenReport = `Screening cycle failed: ${error.message}`;
   } finally {
     _screeningBusy = false;
+    log("cron", `Screening cycle complete — report length: ${screenReport?.length ?? 0}`);
     if (!silent && telegramEnabled()) {
       if (screenReport) {
-        if (liveMessage) await liveMessage.finalize(stripThink(screenReport)).catch(() => {});
+        if (liveMessage) liveMessage.finalize(stripThink(screenReport)).catch(() => {});
         else sendMessage(`🔍 Screening Cycle\n\n${stripThink(screenReport)}`).catch(() => { });
       }
     }
