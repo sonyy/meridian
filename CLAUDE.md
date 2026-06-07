@@ -81,22 +81,24 @@ Autonomous DLMM liquidity provider agent for Meteora pools on Solana.
 |---|---:|---|
 | **Entry / orchestration** | | |
 | `index.js` | ~2016 | Daemon. Cron, REPL, Telegram bot, briefing, HiveMind bootstrap, PnL poller, deterministic close rules, single-candidate skip rule, settings menu. **All** automatic cycles start here. |
-| `agent.js` | 416 | `agentLoop(goal, maxSteps, history, agentType, model, maxOut, opts)`. The ReAct loop. Provider fallback, JSON repair, once-per-session tool locks, no-tool retries, `onToolStart`/`onToolFinish` callbacks for live Telegram messages. |
+| `agent.js` | 416 | `agentLoop(goal, maxSteps, history, agentType, model, maxOut, opts)`. The ReAct loop. Multi-model fallback chain (`config.llm.fallbackModels`), JSON repair, once-per-session tool locks, no-tool retries, `onToolStart`/`onToolFinish` callbacks for live Telegram messages. `withTimeout(promise, ms)` wrapper on portfolio/positions fetch (15s timeout). |
 | `cli.js` | 676 | One-shot CLI; every tool exposed as a subcommand. Also writes a `~/.meridian/SKILL.md` at startup for agent discovery. Loads `.env`/`user-config.json` from `~/.meridian/` if present, else from cwd. |
 | `setup.js` | ~750 | Interactive first-run wizard. Three presets (degen/moderate/safe) + custom. Covers strategy, screening filters, position sizing, trailing TP, per-role models. |
 | **Config & state** | | |
+| `repo-root.js` | 11 | **Always import this for file paths.** Exports `REPO_ROOT` (absolute path to repo root) and `repoPath(...segments)` for constructing stable paths under PM2, npm start, and CLI. |
 | `config.js` | 278 | Loads `user-config.json` → live `config` object. Sections: `risk`, `screening`, `management`, `strategy`, `schedule`, `llm`, `darwin`, `tokens`, `hiveMind`, `api`, `jupiter`, `indicators`. Exposes `computeDeployAmount(walletSol)`, `reloadScreeningThresholds()`. `MIN_SAFE_BINS_BELOW = 35` (exported). |
+| `screening-scales.js` | 34 | Timeframe-scaled screening defaults. `TIMEFRAME_SCREENING_SCALES` maps each tf to `{minFeeActiveTvlRatio, minVolume}`. Exports `normalizeTimeframe(tf)`, `scaleScreeningToTimeframe(tf)`, `getScreeningDefaultsForTimeframe(tf)`. |
 | `prompt.js` | 176 | `buildSystemPrompt(agentType, …)`. Three role-specific prompts. MANAGER is intentionally lean (positions pre-loaded into goal). SCREENER gets bins_below formula. |
 | **Tools layer** | | |
 | `tools/definitions.js` | 1124 | OpenAI-format tool schemas. **Source of truth for what the LLM sees.** All 40+ tool names listed. |
-| `tools/executor.js` | 844 | `executeTool(name, args)`. Pre-flight safety checks for `PROTECTED_TOOLS = {deploy, claim, close, swap, self_update}`. Validates pool thresholds via fresh pool discovery call before deploy. Post-tool side-effects: telegram notifications, pool-memory auto-annotation on `low yield` close, auto-swap base→SOL on close. |
+| `tools/executor.js` | 844 | `executeTool(name, args)`. Pre-flight safety checks for `PROTECTED_TOOLS = {deploy, claim, close, swap, self_update}`. Validates pool thresholds via fresh pool discovery call before deploy. `update_config` auto-scales fee/volume when timeframe changes via `scaleScreeningToTimeframe()`. Post-tool side-effects: telegram notifications, pool-memory auto-annotation on `low yield` close, auto-swap base→SOL on close. |
 | `tools/dlmm.js` | huge | Meteora DLMM SDK wrapper. **Lazy-loads** `@meteora-ag/dlmm` to avoid CJS-import-time crash in DRY_RUN/test. Pool cache (5 min), metadata cache (15 min), positions cache (5 min TTL + inflight dedup). `deployPosition`, `getMyPositions`, `getPositionPnl`, `getActiveBin`, `closePosition`, `claimFees`, `searchPools`, `getWalletPositions`, `addLiquidity`, `withdrawLiquidity`. Also has relay-mode (zap-in via LPAgent) and wide-range path (multi-tx `createExtendedEmptyPosition` + `addLiquidityByStrategyChunkable` for >69 bin ranges). Asserts Meteora bin-array initialization rent never charged. |
-| `tools/screening.js` | 862 | `discoverPools`, `getTopCandidates` (hard filter + enrich + score), `getPoolDetail`. Scoring = `fee_tvl*1000 + organic*10 + vol/100 + holders/100`. Has Discord signal merge/only modes, PVP-rival detection. |
+| `tools/screening.js` | 862 | `discoverPools`, `getTopCandidates` (hard filter + enrich + score), `getPoolDetail`. Scoring = `fee_tvl*1000 + organic*10 + vol/100 + holders/100`. Has Discord signal merge/only modes, PVP-rival detection. **OKX enrichment removed** — data now sourced from Jupiter + GMGN dynamic-import fallback chain. Dev blocklist check in `getTopCandidates`. |
 | `tools/wallet.js` | 251 | `getWalletBalances` (Helius), `swapToken` (Jupiter Swap V2). `normalizeMint` collapses "SOL"/"native"/any So1-prefixed token to wrapped-SOL. Built-in referral: 50 bps to a fixed address (configurable). |
-| `tools/token.js` | 209 | `getTokenInfo` (Jupiter datapi), `getTokenHolders` (top 100 + filter pool-tagged), `getTokenNarrative` (Jupiter ChainInsight). Cross-references smart wallets from `smart-wallets.json`. |
+| `tools/token.js` | 209 | `getTokenInfo` (Jupiter datapi), `getTokenHolders` (top 100 + filter pool-tagged), `getTokenNarrative` (Jupiter ChainInsight). Cross-references smart wallets from `smart-wallets.json`. Has `JUPITER_ONLY` mode to skip GMGN fetches. |
 | `tools/study.js` | 152 | `studyTopLPers` → Agent Meridian `/top-lp` + `/study-top-lp`. Returns ranked LPer patterns (avg hold, win rate, preferred strategy). |
 | `tools/agent-meridian.js` | 110 | `agentMeridianJson(path, opts)` with retry/backoff. Default base = `https://api.agentmeridian.xyz/api`. |
-| `tools/chart-indicators.js` | 299 | `confirmIndicatorPreset({mint, side})`. Eight presets: `supertrend_break`, `rsi_reversal`, `bollinger_reversion`, `rsi_plus_supertrend`, `supertrend_or_rsi`, `bb_plus_rsi`, `fibo_reclaim`, `fibo_reject`. Fetches from Agent Meridian `/chart-indicators/{mint}`. |
+| `tools/chart-indicators.js` | 299 | `confirmIndicatorPreset({mint, side})`. Dedup parallel chart calls per mint. Eight presets: `supertrend_break`, `rsi_reversal`, `bollinger_reversion`, `rsi_plus_supertrend`, `supertrend_or_rsi`, `bb_plus_rsi`, `fibo_reclaim`, `fibo_reject`. Fetches from Agent Meridian `/chart-indicators/{mint}`. |
 | **Persistence (all `.json` at repo root)** | | |
 | `state.js` | 513 | `trackPosition`, `markOutOfRange/InRange`, `recordClaim`, `recordClose`, `setPositionInstruction`, `updatePnlAndCheckExits` (the deterministic rules: STOP_LOSS, TRAILING_TP, OUT_OF_RANGE, LOW_YIELD), `getStateSummary`. `syncOpenPositions` reconciles local state with on-chain after 5 min grace. |
 | `pool-memory.js` | 405 | Per-pool deploy history + rolling 48-snapshot trend (5min × 4h). Computes `avg_pnl_pct`, `win_rate`, `adjusted_win_rate` (excludes OOR pumps). Cooldown logic: low yield → 4h pool cooldown, 3× OOR closes → 12h pool+token cooldown, optional repeat-deploy cooldown (configurable trigger count/hours/min fee yield/scope). `recordPositionSnapshot`, `recallForPool` for prompt injection. |
@@ -149,7 +151,7 @@ Some tools are explicitly **never** sent to GENERAL unless the goal matches an i
 
 - **System prompt is built at the start of every cycle** with: portfolio, positions, state summary, lessons (3-tier cap — pinned / role / recent), performance summary, decision summary, optional signal weights summary (SCREENER only), `lessons_for_prompt`.
 - **Messages get pushed in OpenAI format** unless the provider rejects the `system` role — then we switch to `providerMode = "user_embedded"` and embed the system prompt inside a user message.
-- **Per-step retry**: 3 attempts on transient errors. If the response is 502/503/529 the second attempt swaps to fallback model `stepfun/step-3.5-flash:free`. If `tool_choice=required` is rejected or the provider is in thinking mode, retry with `tool_choice=auto` / omitted.
+- **Per-step retry**: 3+ attempts with multi-model fallback chain. On 502/503/529 (or 404) it walks through `config.llm.fallbackModels` sequentially, trying each model once before looping back to the primary model with backoff. If `tool_choice=required` is rejected or the provider is in thinking mode, retry with `tool_choice=auto` / omitted.
 - **Tool args are JSON-validated** and run through `jsonrepair` if malformed; unrepairable args result in `blocked: true` returned to the LLM.
 - **No-tool-loop guard**: if `mustUseRealTool` is true (action intents, `MUTATING_TOOL_INTENTS` regex) and the LLM responds with text only, we inject a reminder; second failure returns an error message.
 - **Once-per-session tool locks**:
@@ -295,7 +297,7 @@ All persistent files are loaded/saved on each call — no in-memory caching laye
 | `management` | `minClaimAmount`, `autoSwapAfterClaim`, `outOfRangeBinsToClose`, `outOfRangeWaitMinutes`, `oorCooldownTriggerCount`, `oorCooldownHours`, `repeatDeployCooldownEnabled`, `repeatDeployCooldownTriggerCount`, `repeatDeployCooldownHours`, `repeatDeployCooldownScope`, `repeatDeployCooldownMinFeeEarnedPct`, `minVolumeToRebalance`, `stopLossPct`, `takeProfitPct`, `minFeePerTvl24h`, `minAgeBeforeYieldCheck`, `minSolToOpen`, `deployAmountSol`, `gasReserve`, `positionSizePct`, `trailingTakeProfit`, `trailingTriggerPct`, `trailingDropPct`, `pnlSanityMaxDiffPct`, `solMode` | 5, false, 10, 30, 3, 12, true, 3, 12, "token", 0, 1000, -50, 5, 7, 60, 0.55, 0.5, 0.2, 0.35, true, 3, 1.5, 5, false |
 | `strategy` | `strategy`, `minBinsBelow`, `maxBinsBelow`, `defaultBinsBelow` | bid_ask, 35, 69, 69 |
 | `schedule` | `managementIntervalMin`, `screeningIntervalMin`, `healthCheckIntervalMin` | 10, 30, 60 |
-| `llm` | `temperature`, `maxTokens`, `maxSteps`, `managementModel`, `screeningModel`, `generalModel` | 0.373, 4096, 20, healer-alpha, hunter-alpha, healer-alpha |
+| `llm` | `temperature`, `maxTokens`, `maxSteps`, `managementModel`, `screeningModel`, `generalModel`, `fallbackModels` | 0.373, 4096, 20, healer-alpha, hunter-alpha, healer-alpha, [] |
 | `darwin` | `enabled`, `windowDays`, `recalcEvery`, `boostFactor`, `decayFactor`, `weightFloor`, `weightCeiling`, `minSamples` | true, 60, 5, 1.05, 0.95, 0.3, 2.5, 10 |
 | `tokens` | `SOL`, `USDC`, `USDT` (mint addresses) | canonical |
 | `hiveMind` | `url`, `apiKey`, `agentId`, `pullMode` | `https://api.agentmeridian.xyz`, built-in key, auto-generated, "auto" |
@@ -422,6 +424,8 @@ When adding a new pre-LLM enrichment, follow the **3-strikes (Discord pre-checks
 
 When scheduling work, follow the **`_busy` flag + cooldown** pattern. `_managementBusy`, `_screeningBusy`, `_pnlPollBusy`, `_pollTriggeredAt`, `_screeningLastTriggered` are the canonical examples.
 
+**Always import `repoPath` from `repo-root.js` instead of computing `__dirname`-based paths.** `repoPath("user-config.json")` is stable under PM2, npm start, and CLI — bare `path.join(__dirname, …)` breaks when a caller's `__dirname` differs from the repo root. See `repo-root.js` for the pattern.
+
 ---
 
 ## What to read next
@@ -431,5 +435,7 @@ When scheduling work, follow the **`_busy` flag + cooldown** pattern. `_manageme
 - Adding a new persistent state file → copy `state.js` or `pool-memory.js`. Add a getter to `index.js` system-prompt section if the LLM needs to see it.
 - Changing the LLM contract → `prompt.js` (buildSystemPrompt) and `agent.js` (INTENT_TOOLS + role sets + safety guards).
 - Changing deploy/close behavior → `tools/dlmm.js` (the SDK wrapper) and `tools/executor.js` (the post-tool side effects + Telegram notify + auto-swap).
+- Timeframe-scaling screening thresholds → `screening-scales.js` (`normalizeTimeframe` / `scaleScreeningToTimeframe`).
+- Stable repo-root paths → `repo-root.js` (`repoPath` for PM2-safe file paths).
 - Discord listener issues → `discord-listener/pre-checks.js`.
 - HiveMind protocol issues → `hivemind.js` (push side) and `lessons.js#getLessonsForPrompt` (pull side injection).
