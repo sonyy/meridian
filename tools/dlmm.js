@@ -578,6 +578,11 @@ export async function deployPosition({
   fee_tvl_ratio,
   organic_score,
   initial_value_usd,
+  // entry market conditions (injected by executor safety checks)
+  entry_mcap,
+  entry_tvl,
+  entry_volume,
+  entry_holders,
 }) {
   pool_address = normalizeMint(pool_address);
   const activeStrategy = strategy || config.strategy.strategy;
@@ -815,6 +820,10 @@ export async function deployPosition({
           active_bin: activeBin.binId,
           initial_value_usd,
           signal_snapshot: signalSnapshot,
+          entry_mcap,
+          entry_tvl,
+          entry_volume,
+          entry_holders,
         });
       }
 
@@ -953,6 +962,10 @@ export async function deployPosition({
       active_bin: activeBin.binId,
       initial_value_usd,
       signal_snapshot: signalSnapshot,
+      entry_mcap,
+      entry_tvl,
+      entry_volume,
+      entry_holders,
     });
 
     appendDecision({
@@ -1727,45 +1740,21 @@ export async function closePosition({ position_address, reason }) {
           };
         }
 
-        recordClose(position_address, reason || "agent decision");
+        let exitMarket = {};
+        try {
+          const { default: fetch } = await import("node-fetch").catch(() => ({ default: globalThis.fetch }));
+          const exitDetail = await fetch(`https://pool-discovery-api.datapi.meteora.ag/pools?page_size=1&filter_by=${encodeURIComponent(`pool_address=${poolAddress}`)}&timeframe=${encodeURIComponent(config.screening?.timeframe || "5m")}`).then(r => r.json()).catch(() => null);
+          const ep = exitDetail?.data?.[0];
+          if (ep) {
+            exitMarket = {
+              exit_mcap: parseFloat(ep?.token_x?.market_cap) || null,
+              exit_tvl: parseFloat(ep?.tvl ?? ep?.active_tvl) || null,
+              exit_volume: parseFloat(ep?.volume) || null,
+            };
+          }
+        } catch { /* non-blocking */ }
 
         if (tracked) {
-          const deployedAt = new Date(tracked.deployed_at).getTime();
-          const minutesHeld = Math.floor((Date.now() - deployedAt) / 60000);
-          let minutesOOR = 0;
-          if (tracked.out_of_range_since) {
-            minutesOOR = Math.floor((Date.now() - new Date(tracked.out_of_range_since).getTime()) / 60000);
-          }
-
-          let pnlUsd = 0;
-          let pnlTrueUsd = 0;
-          let pnlPct = 0;
-          let finalValueUsd = 0;
-          let initialUsd = 0;
-          let feesUsd = tracked.total_fees_claimed_usd || 0;
-          try {
-            const closedUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${wallet.publicKey.toString()}&status=closed&pageSize=50&page=1`;
-            for (let attempt = 0; attempt < 6; attempt++) {
-              const res = await fetch(closedUrl);
-              if (res.ok) {
-                const data = await res.json();
-                const posEntry = (data.positions || []).find((entry) => entry.positionAddress === position_address);
-                if (posEntry) {
-                  pnlTrueUsd = safeNum(posEntry.pnlUsd);
-                  pnlUsd = config.management.solMode ? getClosedPnlValue(posEntry, true) : pnlTrueUsd;
-                  pnlPct = getClosedPnlPct(posEntry, config.management.solMode);
-                  finalValueUsd = parseFloat(posEntry.allTimeWithdrawals?.total?.usd || 0);
-                  initialUsd = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
-                  feesUsd = parseFloat(posEntry.allTimeFees?.total?.usd || 0) || feesUsd;
-                  break;
-                }
-              }
-              if (attempt < 5) await new Promise((resolve) => setTimeout(resolve, 5000));
-            }
-          } catch (e) {
-            log("close_warn", `Relay closed PnL fetch failed: ${e.message}`);
-          }
-
           const closeBaseMint = livePosition?.base_mint || pool.lbPair.tokenXMint.toString();
           const signalSnapshot = resolvePerformanceSignalSnapshot({
             poolAddress,
@@ -1792,6 +1781,11 @@ export async function closePosition({ position_address, reason }) {
             minutes_held: minutesHeld,
             close_reason: reason || "agent decision",
             signal_snapshot: signalSnapshot,
+            entry_mcap: tracked.entry_mcap ?? null,
+            entry_tvl: tracked.entry_tvl ?? null,
+            entry_volume: tracked.entry_volume ?? null,
+            entry_holders: tracked.entry_holders ?? null,
+            ...exitMarket,
           });
 
           appendDecision({
@@ -2060,6 +2054,19 @@ export async function closePosition({ position_address, reason }) {
         tracked,
       });
 
+      let exitMarket = {};
+      try {
+        const exitDetail = await fetch(`https://pool-discovery-api.datapi.meteora.ag/pools?page_size=1&filter_by=${encodeURIComponent(`pool_address=${poolAddress}`)}&timeframe=${encodeURIComponent(config.screening?.timeframe || "5m")}`).then(r => r.json()).catch(() => null);
+        const ep = exitDetail?.data?.[0];
+        if (ep) {
+          exitMarket = {
+            exit_mcap: parseFloat(ep?.token_x?.market_cap) || null,
+            exit_tvl: parseFloat(ep?.tvl ?? ep?.active_tvl) || null,
+            exit_volume: parseFloat(ep?.volume) || null,
+          };
+        }
+      } catch { /* non-blocking */ }
+
       await recordPerformance({
         position: position_address,
         pool: poolAddress,
@@ -2079,6 +2086,11 @@ export async function closePosition({ position_address, reason }) {
         minutes_held: minutesHeld,
         close_reason: reason || "agent decision",
         signal_snapshot: signalSnapshot,
+        entry_mcap: tracked.entry_mcap ?? null,
+        entry_tvl: tracked.entry_tvl ?? null,
+        entry_volume: tracked.entry_volume ?? null,
+        entry_holders: tracked.entry_holders ?? null,
+        ...exitMarket,
       });
 
       appendDecision({

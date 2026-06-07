@@ -1,6 +1,8 @@
 import fs from "fs";
+import { log } from "./logger.js";
+import { repoPath } from "./repo-root.js";
 
-const DECISION_LOG_FILE = "./decision-log.json";
+const DECISION_LOG_FILE = repoPath("decision-log.json");
 const MAX_DECISIONS = 100;
 
 function load() {
@@ -9,7 +11,8 @@ function load() {
   }
   try {
     return JSON.parse(fs.readFileSync(DECISION_LOG_FILE, "utf8"));
-  } catch {
+  } catch (error) {
+    log("decision_log_warn", `Invalid ${DECISION_LOG_FILE}: ${error.message}`);
     return { decisions: [] };
   }
 }

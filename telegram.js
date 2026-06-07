@@ -1,10 +1,8 @@
 import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
 import { log } from "./logger.js";
+import { repoPath } from "./repo-root.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const USER_CONFIG_PATH = path.join(__dirname, "user-config.json");
+const USER_CONFIG_PATH = repoPath("user-config.json");
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN || null;
 const BASE  = TOKEN ? `https://api.telegram.org/bot${TOKEN}` : null;
@@ -15,21 +13,38 @@ const ALLOWED_USER_IDS = new Set(
     .filter(Boolean)
 );
 
-let chatId   = process.env.TELEGRAM_CHAT_ID || null;
+let chatId = null;
 let _offset  = 0;
 let _polling = false;
 let _liveMessageDepth = 0;
 let _warnedMissingChatId = false;
 let _warnedMissingAllowedUsers = false;
 
+function nonEmptyChatId(value) {
+  if (value == null) return null;
+  const trimmed = String(value).trim();
+  return trimmed || null;
+}
+
 // ─── chatId persistence ──────────────────────────────────────────
-function loadChatId() {
+function resolveChatId() {
+  const fromEnv = nonEmptyChatId(process.env.TELEGRAM_CHAT_ID);
+  let fromConfig = null;
   try {
     if (fs.existsSync(USER_CONFIG_PATH)) {
       const cfg = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"));
-      if (cfg.telegramChatId) chatId = cfg.telegramChatId;
+      fromConfig = nonEmptyChatId(cfg.telegramChatId);
     }
-  } catch { /**/ }
+  } catch (error) {
+    log("telegram_warn", `Invalid user-config.json; chatId not loaded: ${error.message}`);
+  }
+  // user-config wins when set; otherwise fall back to .env
+  const resolved = fromConfig || fromEnv || null;
+  return resolved != null ? String(resolved) : null;
+}
+
+function loadChatId() {
+  chatId = resolveChatId();
 }
 
 function saveChatId(id) {
@@ -59,7 +74,7 @@ function isAuthorizedIncomingMessage(msg) {
     return false;
   }
 
-  if (incomingChatId !== chatId) return false;
+  if (incomingChatId !== String(chatId)) return false;
 
   if (chatType !== "private" && ALLOWED_USER_IDS.size === 0) {
     if (!_warnedMissingAllowedUsers) {
@@ -91,7 +106,11 @@ async function postTelegram(method, body) {
     });
     if (!res.ok) {
       const err = await res.text();
-      log("telegram_error", `${method} ${res.status}: ${err.slice(0, 200)}`);
+      if (res.status === 401) {
+        log("telegram_error", `${method} 401 Unauthorized — check TELEGRAM_BOT_TOKEN in .env (invalid, revoked, or encrypted without .envrypt key)`);
+      } else {
+        log("telegram_error", `${method} ${res.status}: ${err.slice(0, 200)}`);
+      }
       return null;
     }
     return await res.json();
@@ -111,7 +130,11 @@ async function postTelegramRaw(method, body) {
     });
     if (!res.ok) {
       const err = await res.text();
-      log("telegram_error", `${method} ${res.status}: ${err.slice(0, 200)}`);
+      if (res.status === 401) {
+        log("telegram_error", `${method} 401 Unauthorized — check TELEGRAM_BOT_TOKEN in .env (invalid, revoked, or encrypted without .envrypt key)`);
+      } else {
+        log("telegram_error", `${method} ${res.status}: ${err.slice(0, 200)}`);
+      }
       return null;
     }
     return await res.json();
@@ -385,10 +408,51 @@ async function poll(onMessage) {
   }
 }
 
+const BOT_COMMANDS = [
+  { command: "help",       description: "Show commands" },
+  { command: "status",     description: "Wallet + positions snapshot" },
+  { command: "wallet",     description: "Wallet, deploy amount, HiveMind status" },
+  { command: "positions",  description: "List open positions" },
+  { command: "pool",       description: "Detailed info for one open position" },
+  { command: "close",      description: "Close one position by index" },
+  { command: "closeall",   description: "Close all open positions" },
+  { command: "set",        description: "Set note/instruction on position" },
+  { command: "config",     description: "Show important runtime config" },
+  { command: "settings",   description: "Button menu for common config" },
+  { command: "setcfg",     description: "Update persisted config key" },
+  { command: "screen",     description: "Refresh deterministic candidate list" },
+  { command: "candidates", description: "Show latest cached candidates" },
+  { command: "deploy",     description: "Deploy candidate by cached index" },
+  { command: "briefing",   description: "Morning briefing" },
+  { command: "hive",       description: "HiveMind sync status" },
+  { command: "pause",      description: "Stop cron cycles" },
+  { command: "resume",     description: "Start cron cycles again" },
+  { command: "stop",       description: "Shut down agent" },
+];
+
+async function registerCommands() {
+  if (!BASE) return;
+  try {
+    await fetch(`${BASE}/setMyCommands`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ commands: BOT_COMMANDS }),
+    });
+    log("telegram", "Bot commands registered");
+  } catch (e) {
+    log("telegram_warn", `Failed to register bot commands: ${e.message}`);
+  }
+}
+
 export function startPolling(onMessage) {
   if (!TOKEN) return;
+  loadChatId();
+  if (!chatId) {
+    log("telegram_warn", "TELEGRAM_CHAT_ID not set in .env or user-config.telegramChatId — outbound notifications and inbound control disabled until configured.");
+  }
   _polling = true;
   poll(onMessage); // fire-and-forget
+  registerCommands();
   log("telegram", "Bot polling started");
 }
 
@@ -397,7 +461,8 @@ export function stopPolling() {
 }
 
 // ─── Notification helpers ────────────────────────────────────────
-export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, rangeCoverage, binStep, baseFee, baseMint }) {
+export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, rangeCoverage, binStep, baseFee }) {
+  if (hasActiveLiveMessage()) return;
   const priceStr = priceRange
     ? `Price range: ${priceRange.min < 0.0001 ? priceRange.min.toExponential(3) : priceRange.min.toFixed(6)} – ${priceRange.max < 0.0001 ? priceRange.max.toExponential(3) : priceRange.max.toFixed(6)}\n`
     : "";
@@ -407,9 +472,8 @@ export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, 
   const poolStr = (binStep || baseFee)
     ? `Bin step: ${binStep ?? "?"}  |  Base fee: ${baseFee != null ? baseFee + "%" : "?"}\n`
     : "";
-  const pairLink = baseMint ? `<a href="https://gmgn.ai/sol/token/${baseMint}">${pair}</a>` : pair;
   await sendHTML(
-    `✅ <b>Deployed</b> ${pairLink}\n` +
+    `✅ <b>Deployed</b> ${pair}\n` +
     `Amount: ${amountSol} SOL\n` +
     priceStr +
     coverageStr +
@@ -419,11 +483,11 @@ export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, 
   );
 }
 
-export async function notifyClose({ pair, pnlUsd, pnlPct, baseMint }) {
+export async function notifyClose({ pair, pnlUsd, pnlPct }) {
+  if (hasActiveLiveMessage()) return;
   const sign = pnlUsd >= 0 ? "+" : "";
-  const pairLink = baseMint ? `<a href="https://gmgn.ai/sol/token/${baseMint}">${pair}</a>` : pair;
   await sendHTML(
-    `🔒 <b>Closed</b> ${pairLink}\n` +
+    `🔒 <b>Closed</b> ${pair}\n` +
     `PnL: ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}${(pnlPct ?? 0).toFixed(2)}%)`
   );
 }
@@ -442,17 +506,6 @@ export async function notifyOutOfRange({ pair, minutesOOR }) {
   await sendHTML(
     `⚠️ <b>Out of Range</b> ${pair}\n` +
     `Been OOR for ${minutesOOR} minutes`
-  );
-}
-
-export async function notifyNearThreshold({ pair, pnlPct, thresholdType, thresholdValue, distance }) {
-  if (hasActiveLiveMessage()) return;
-  const emoji = thresholdType === "stop_loss" ? "🛑" : thresholdType === "take_profit" ? "🎯" : "⚠️";
-  const label = thresholdType === "stop_loss" ? "Stop loss" : thresholdType === "take_profit" ? "Take profit" : "Threshold";
-  await sendHTML(
-    `${emoji} <b>Near ${label}</b> ${pair}
-` +
-    `PnL: ${pnlPct != null ? pnlPct.toFixed(2) + "%" : "?"} | ${label}: ${thresholdValue}% | ${distance != null ? distance.toFixed(2) + "% away" : ""}`
   );
 }
 
