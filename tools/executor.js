@@ -708,7 +708,7 @@ export async function executeTool(name, args) {
     } else if (result?.error || result?.blocked) {
       // Notify on deploy failures
       if (name === "deploy_position") {
-        const reason = result.reason || result.error || "unknown error";
+        const reason = (result.reason || result.error || "unknown error").replace(/[<>]/g, "").trim();
         const poolLabel = args.pool_name || args.pool_address?.slice(0, 8) || "unknown";
         const nameTag = args.base_mint ? `<a href="https://gmgn.ai/sol/token/${args.base_mint}">${poolLabel}</a>` : poolLabel;
         sendHTML(`❌ Deploy failed: ${nameTag} — ${reason}`).catch(() => {});
@@ -731,7 +731,7 @@ export async function executeTool(name, args) {
     if (name === "deploy_position") {
       const poolLabel = args.pool_name || args.pool_address?.slice(0, 8) || "unknown";
       const nameTag = args.base_mint ? `<a href="https://gmgn.ai/sol/token/${args.base_mint}">${poolLabel}</a>` : poolLabel;
-      sendHTML(`❌ Deploy failed: ${nameTag} — ${error.message}`).catch(() => {});
+      sendHTML(`❌ Deploy failed: ${nameTag} — ${String(error.message).replace(/[<>]/g, "").trim()}`).catch(() => {});
     }
 
     // Return error to LLM so it can decide what to do
