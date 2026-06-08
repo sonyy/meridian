@@ -1,4 +1,5 @@
 import { discoverPools, getPoolDetail, getTopCandidates } from "./screening.js";
+import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { checkSolSupertrend } from "./solSupertrend.js";
 import {
   getActiveBin,
@@ -445,6 +446,10 @@ const toolMap = {
       rsiOversold: ["indicators", "rsiOversold", ["chartIndicators", "rsiOversold"]],
       rsiOverbought: ["indicators", "rsiOverbought", ["chartIndicators", "rsiOverbought"]],
       requireAllIntervals: ["indicators", "requireAllIntervals", ["chartIndicators", "requireAllIntervals"]],
+      maxEntryRsi: ["indicators", "maxEntryRsi", ["chartIndicators", "maxEntryRsi"]],
+      extensionLookbackBars: ["indicators", "extensionLookbackBars"],
+      extensionTagBand: ["indicators", "extensionTagBand"],
+      extensionFloorBand: ["indicators", "extensionFloorBand"],
       // SOL supertrend entry guard
       requireSolSupertrend: ["screening", "requireSolSupertrend"],
       solSupertrendTimeframe: ["screening", "solSupertrendTimeframe"],
@@ -899,6 +904,62 @@ async function runSafetyChecks(name, args) {
           return {
             pass: false,
             reason: `Insufficient SOL: have ${balance.sol} SOL, need ${minRequired} SOL (${amountY} deploy + ${gasReserve} gas reserve).`,
+          };
+        }
+      }
+
+      // Entry indicator confirmation — re-check at deploy moment (screen-time
+      // can be minutes stale). If config.indicators.enabled is false, skip.
+      const baseMint = args.base_mint;
+      if (config.indicators?.enabled && baseMint) {
+        try {
+          const confirmation = await confirmIndicatorPreset({
+            mint: baseMint,
+            side: "entry",
+            refresh: true,
+          });
+          if (confirmation && confirmation.enabled && Array.isArray(confirmation.intervals)) {
+            const primary = confirmation.intervals.find((i) => i.ok) || confirmation.intervals[0];
+            log(
+              "safety",
+              `deploy-time indicator ${baseMint.slice(0, 8)} confirmed=${confirmation.confirmed} reason="${confirmation.reason}" signal=${JSON.stringify(primary?.signal || null)}`,
+            );
+          }
+          if (confirmation && confirmation.enabled && !confirmation.confirmed) {
+            return {
+              pass: false,
+              reason: `Entry indicator rejected at deploy: ${confirmation.reason || "Supertrend not confirming entry"}. Trend likely flipped since screening — skip this deploy.`,
+            };
+          }
+          // Fail closed when every interval fetch errored — committing capital
+          // without a confirmed entry signal is worse than waiting a cycle.
+          if (confirmation && confirmation.enabled && confirmation.skipped) {
+            return {
+              pass: false,
+              reason: `Entry indicator check unavailable (${confirmation.reason}). Refusing to deploy without supertrend confirmation — retry next cycle.`,
+            };
+          }
+
+          // Entry RSI ceiling — block deploys into extremely overbought conditions
+          // even when the preset confirms. `> 0` so null/0 cleanly disables.
+          const maxEntryRsi = Number(config.indicators.maxEntryRsi);
+          if (Number.isFinite(maxEntryRsi) && maxEntryRsi > 0 && confirmation?.intervals?.length) {
+            const overbought = confirmation.intervals
+              .filter((i) => i.ok && i.signal?.rsi != null && Number(i.signal.rsi) >= maxEntryRsi)
+              .sort((a, b) => Number(b.signal.rsi) - Number(a.signal.rsi))[0];
+            if (overbought) {
+              const rsi = Number(overbought.signal.rsi).toFixed(2);
+              return {
+                pass: false,
+                reason: `Entry RSI ceiling: RSI ${rsi} on ${overbought.interval} >= max ${maxEntryRsi}. Token overbought — skip this deploy.`,
+              };
+            }
+          }
+        } catch (err) {
+          log("safety", `indicator check error for ${baseMint?.slice(0,8)}: ${err.message}`);
+          return {
+            pass: false,
+            reason: `Entry indicator check failed (${err.message}). Refusing to deploy without confirmation — retry next cycle.`,
           };
         }
       }

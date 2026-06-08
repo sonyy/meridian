@@ -313,6 +313,7 @@ export const config = {
     rsiOversold: indicatorUserConfig.rsiOversold ?? 30,
     rsiOverbought: indicatorUserConfig.rsiOverbought ?? 80,
     requireAllIntervals: indicatorUserConfig.requireAllIntervals ?? false,
+    maxEntryRsi: indicatorUserConfig.maxEntryRsi ?? null,
     // Supertrend BB extension composite preset params (used when entryPreset = "supertrend_bb_extension")
     extensionLookbackBars: indicatorUserConfig.extensionLookbackBars ?? 6,
     extensionTagBand: indicatorUserConfig.extensionTagBand ?? "upper",
