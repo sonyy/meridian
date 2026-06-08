@@ -230,14 +230,15 @@ function evaluatePreset(side, preset, payload) {
   }
 }
 
-// Pure evaluator for the supertrend_bb_extension composite entry preset.
-// Checks 5m (bands + veto) and 15m (trend filter) together — different conditions per interval.
-// Confirms when:
-//   1. 15m supertrend is bullish (trend filter — pullback will recover)
-//   2. 5m close is at/above supertrend (defensive veto)
-//   3. 5m close still above floor band (middle/lower — hasn't broken down yet)
-//   4. Price tagged the tag band (upper/middle) within last N closed bars (catch the extension)
-// Degrades to single-bar check when no recent series available (Meridian API fallback).
+// Pure decision for the supertrend_bb_extension composite entry (no I/O). params pre-coerced:
+//   { lookbackBars:number, tagBand:"upper"|"middle", floorBand:"middle"|"lower" }.
+// Thesis (single-sided SOL, bins BELOW the active bin): deploy when price is ELEVATED and
+// about to pull back DOWN into the below-price liquidity. Confirm when 15m supertrend is
+// bullish (trend filter, so the pullback recovers), price TAGGED the upper 5m band within
+// the last N closed bars (it got extended), the latest close is still above the floor band
+// (the pullback hasn't already completed/broken down), and close>=supertrend (veto).
+// Degrades to a single-bar check when no `recent` series is present (meridian fallback).
+// Returns { confirmed, reason, signal5m, signal15m, degraded }.
 export function evaluateSupertrendBbExtension(payload5m, payload15m, params) {
   const s5 = buildSignalSummary(payload5m);
   const s15 = buildSignalSummary(payload15m);
@@ -246,19 +247,17 @@ export function evaluateSupertrendBbExtension(payload5m, payload15m, params) {
   const floorBand = params.floorBand === "lower" ? "lower" : "middle";
   const base = { signal5m: s5, signal15m: s15, degraded: false };
 
-  // 1. HTF trend filter
+  // 1. HTF trend filter — 15m supertrend must be bullish (so the pullback recovers).
   if (s15.supertrendDirection !== "bullish") {
     return { ...base, confirmed: false, reason: `15m supertrend ${s15.supertrendDirection} (need bullish)` };
   }
-  // 2. 5m ST bullish check
-  if (s5.supertrendDirection !== "bullish") {
-    return { ...base, confirmed: false, reason: `5m supertrend ${s5.supertrendDirection} (need bullish)` };
-  }
-  // 3. Defensive veto — 5m close >= supertrend
+  // 2. Defensive veto — 5m close must be at/above its supertrend.
+  //    The upstream supertrendDirection / breakUp flag has been seen sticky from an earlier
+  //    candle after price already fell back through ST, so we only check the value directly.
   if (s5.close != null && s5.supertrendValue != null && s5.close < s5.supertrendValue) {
     return { ...base, confirmed: false, reason: `Veto: 5m close ${s5.close} < supertrend ${s5.supertrendValue}` };
   }
-  // 4. Floor — latest 5m close still above floor band
+  // 3. Floor — latest 5m close still above the floor band (pullback not yet completed).
   const floorLevel = floorBand === "lower" ? s5.lowerBand : s5.middleBand;
   if (s5.close == null || floorLevel == null || s5.close < floorLevel) {
     return { ...base, confirmed: false, reason: `Below floor: 5m close ${s5.close} < ${floorBand} band ${floorLevel}` };
@@ -291,7 +290,7 @@ export function evaluateSupertrendBbExtension(payload5m, payload15m, params) {
   return {
     ...base, degraded, confirmed: true,
     reason: degraded
-      ? `Degraded confirm: 15m bullish + 5m single-bar ${tagBand}-band tag above floor`
+      ? "Degraded confirm: 15m bullish + single-bar 5m upper-band tag above floor"
       : `15m bullish + 5m tagged ${tagBand} band (last ${lookbackBars} bars), still above ${floorBand}`,
   };
 }
