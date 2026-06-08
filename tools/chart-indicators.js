@@ -1,6 +1,6 @@
 import { config } from "../config.js";
 import { log } from "../logger.js";
-import { buildLocalPayload, fetchCandlesFromDexScreener } from "./gmgn-indicators.js";
+import { fetchGmgnIndicatorPayload } from "./gmgn-indicators.js";
 
 const DEFAULT_INTERVALS = ["5_MINUTE"];
 const DEFAULT_CANDLES = 298;
@@ -345,19 +345,12 @@ async function fetchIndicatorsWithFallback(mint, interval, opts = {}) {
     const payload = await fetchChartIndicatorsForMint(mint, { interval, ...opts });
     return payload;
   } catch (hiveErr) {
-    log("indicators_info", `HiveMind unavailable for ${mint.slice(0, 8)} ${interval}, trying local: ${hiveErr.message}`);
+    log("indicators_info", `HiveMind unavailable for ${mint.slice(0, 8)} ${interval}, trying GMGN: ${hiveErr.message}`);
     try {
-      const candles = await fetchCandlesFromDexScreener(
-        mint, interval, opts.candles || config.indicators.candles || DEFAULT_CANDLES,
-      );
-      if (candles.length < 50) throw new Error(`Only ${candles.length} candles from DexScreener`);
-      return buildLocalPayload(candles, interval, {
-        rsiPeriod: config.indicators.rsiLength || 2,
-        stPeriod: 10,
-        stMultiplier: 3,
-      });
-    } catch (localErr) {
-      throw new Error(`HiveMind+local both failed: ${hiveErr.message} / ${localErr.message}`);
+      const payload = await fetchGmgnIndicatorPayload(mint, { interval, rsiLength: config.indicators.rsiLength || 2 });
+      return payload;
+    } catch (gmgnErr) {
+      throw new Error(`HiveMind+GMGN both failed: ${hiveErr.message} / ${gmgnErr.message}`);
     }
   }
 }
