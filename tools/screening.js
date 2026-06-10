@@ -693,7 +693,8 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     if (eligible.length < before) log("dev_blocklist", `Filtered ${before - eligible.length} pool(s) via dev blocklist`);
   }
 
-  if (config.indicators.enabled && eligible.length > 0) {
+  // GMGN pipeline Stage4 (checkBounceSetup) already handles indicator filtering
+  if (config.indicators.enabled && source !== "gmgn" && eligible.length > 0) {
     const confirmations = await Promise.all(
       eligible.map(async (pool) => {
         try {
