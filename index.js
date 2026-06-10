@@ -416,6 +416,7 @@ After executing, write a brief one-line result per position.
     _managementBusy = false;
     if (!silent && telegramEnabled()) {
       if (mgmtReport) {
+        log("cron", `📨 mgmt report (${mgmtReport.length}c): ${JSON.stringify(stripThink(mgmtReport)).slice(0, 500)}`);
         if (liveMessage) liveMessage.finalize(stripThink(mgmtReport)).catch(() => {});
         else sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
       }
@@ -443,6 +444,9 @@ Screening skipped — previous cycle still running`).catch(() => {});
   _screeningBusy = true; // set immediately — prevents TOCTOU race with concurrent callers
   _screeningLastTriggered = Date.now();
 
+  // Verification data — populated inside try, read in finally
+  const _verify = { gmgnStageCounts: null, deployAttempted: false, deploySucceeded: false, deployFailReason: null };
+
   // Hard guards — don't even run the agent if preconditions aren't met
   let prePositions, preBalance;
   let liveMessage = null;
@@ -468,22 +472,24 @@ Screening skipped — max positions reached (${prePositions.total_positions}/${c
     }
     const minRequired = config.management.deployAmountSol + config.management.gasReserve;
     const isDryRun = process.env.DRY_RUN === "true";
-    if (!isDryRun && preBalance.sol < minRequired) {
-      log("cron", `Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas)`);
-    if (!silent && telegramEnabled()) {
-        await sendMessage(`🔍 Screening Cycle
-
-Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas)`).catch(() => {});
-    }
-      screenReport = `Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas).`;
-      appendDecision({
-        type: "skip",
-        actor: "SCREENER",
-        summary: "Screening skipped",
-        reason: `Insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired})`,
-      });
-      _screeningBusy = false;
-      return screenReport;
+    if (preBalance.sol < minRequired) {
+      log("cron", `Screening note — low SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas) [dry_run=${isDryRun}]`);
+      if (!silent && telegramEnabled()) {
+        const warnMsg = `⚠️ Wallet SOL rendah: ${preBalance.sol.toFixed(3)} SOL (minimal ${minRequired} SOL untuk deploy + gas).`;
+        log("cron", `📨 sending low SOL warning to Telegram`);
+        await sendMessage(warnMsg).catch((e) => log("cron_error", `Low SOL warn send failed: ${e.message}`));
+      }
+      if (!isDryRun) {
+        screenReport = `Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas).`;
+        appendDecision({
+          type: "skip",
+          actor: "SCREENER",
+          summary: "Screening skipped",
+          reason: `Insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired})`,
+        });
+        _screeningBusy = false;
+        return screenReport;
+      }
     }
   } catch (e) {
     log("cron_error", `Screening pre-check failed: ${e.message}`);
@@ -520,6 +526,9 @@ Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequ
     log("cron", `getTopCandidates returned, processing ${topCandidates?.candidates?.length ?? topCandidates?.pools?.length ?? 0} candidates`);
     const candidates = (topCandidates?.candidates || topCandidates?.pools || []).slice(0, 10);
     const earlyFilteredExamples = topCandidates?.filtered_examples || [];
+    const gmgnStageCounts = topCandidates?.stage_counts ?? null;
+    _verify.gmgnStageCounts = gmgnStageCounts;
+    const gmgnAllFiltered = topCandidates?.all_filtered ?? [];
 
     const allCandidates = [];
     for (const pool of candidates) {
@@ -784,16 +793,26 @@ IMPORTANT:
       if (!deploySucceeded && deployFailReason) line += `: ${deployFailReason}`;
       screenReport += `\n\n${line}`;
     }
+    // Sync verification data (block-scoped vars not accessible from finally)
+    _verify.deployAttempted = deployAttempted;
+    _verify.deploySucceeded = deploySucceeded;
+    _verify.deployFailReason = deployFailReason;
   } catch (error) {
     log("cron_error", `Screening cycle failed: ${error.message}`);
     screenReport = `Screening cycle failed: ${error.message}`;
   } finally {
     _screeningBusy = false;
     log("cron", `Screening cycle complete — report length: ${screenReport?.length ?? 0}`);
+
+    // ── Auto-verify Telegram report ──────────────────────────────────
+    verifyScreenReport(screenReport, _verify);
+
     if (!silent && telegramEnabled()) {
       if (screenReport) {
-        if (liveMessage) liveMessage.finalize(stripThink(screenReport)).catch(() => {});
-        else sendMessage(`🔍 Screening Cycle\n\n${stripThink(screenReport)}`).catch(() => { });
+        const finalText = stripThink(screenReport);
+        log("cron", `📨 screen report: ${JSON.stringify(finalText).slice(0, 500)}`);
+        if (liveMessage) liveMessage.finalize(finalText).catch(() => {});
+        else sendMessage(`🔍 Screening Cycle\n\n${finalText}`).catch(() => { });
       }
     }
   }
@@ -1047,6 +1066,60 @@ function buildGmgnFunnelReport(stageCounts, allFiltered = [], { fromStage = 1 } 
     .map(([key, items]) => `${stageLabels[key] || key}:\n${items.map(r => `  • ${r}`).join("\n")}`)
     .join("\n");
   return details ? `${funnel}\n\n${details}` : funnel;
+}
+
+function verifyScreenReport(reportText, verify) {
+  if (!reportText || !verify) return;
+  const issues = [];
+
+  // 1. Funnel consistency — ranked >= s1 >= s2 >= s3 >= s4 >= s5
+  const sc = verify.gmgnStageCounts;
+  if (sc && sc.ranked != null) {
+    const order = ["ranked", "s1", "s2", "s3", "s4", "s5"];
+    for (let i = 1; i < order.length; i++) {
+      const prev = sc[order[i-1]];
+      const cur = sc[order[i]];
+      if (cur != null && prev != null && cur > prev) {
+        issues.push(`funnel ↑ ${order[i]}(${cur}) > ${order[i-1]}(${prev})`);
+      }
+    }
+
+    // Funnel numbers in report text match data
+    const m = reportText.match(/ranked=(\d+).*?S1=(\d+).*?S2=(\d+).*?S3=(\d+).*?S4=(\d+).*?final=(\d+)/s);
+    if (m) {
+      const pairs = [["ranked",m[1]],["S1",m[2]],["S2",m[3]],["S3",m[4]],["S4",m[5]],["final",m[6]]];
+      const keyMap = { ranked:"ranked", S1:"s1", S2:"s2", S3:"s3", S4:"s4", final:"s5" };
+      for (const [label, val] of pairs) {
+        if (Number(val) !== sc[keyMap[label]]) {
+          issues.push(`funnel ${label} mismatch report=${val} data=${sc[keyMap[label]]}`);
+        }
+      }
+    }
+  }
+
+  // 2. Decision alignment
+  const saysNoDeploy = /⛔\s*NO\s*DEPLOY/i.test(reportText);
+  const saysDeploy = /🚀\s*DEPLOY/i.test(reportText);
+
+  if (verify.deploySucceeded && saysNoDeploy) {
+    issues.push("deploy OK but report says NO DEPLOY");
+  }
+  if (verify.deploySucceeded && !saysDeploy) {
+    issues.push("deploy OK but report missing 🚀 DEPLOY");
+  }
+  if (saysDeploy && !verify.deployAttempted && !verify.deploySucceeded) {
+    issues.push("report says DEPLOYED but no deploy was attempted");
+  }
+
+  // 3. NO DEPLOY report structure
+  if (saysNoDeploy) {
+    if (!/BEST LOOKING CANDIDATE/i.test(reportText)) issues.push("NO DEPLOY missing BEST LOOKING CANDIDATE");
+    if (!/WHY SKIPPED/i.test(reportText)) issues.push("NO DEPLOY missing WHY SKIPPED");
+    if (!/REJECTED/i.test(reportText)) issues.push("NO DEPLOY missing REJECTED section");
+  }
+
+  const pass = issues.length === 0;
+  log("verify", `${pass ? "✅" : "⚠️"} screen report: ${pass ? "PASS" : issues.join(" | ")}`);
 }
 
 function getLoneCandidateSkipReason({ pool, sw, n, ti } = {}) {
