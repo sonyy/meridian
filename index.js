@@ -27,6 +27,7 @@ import {
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
 import { tickPaperPositions } from "./paper-positions.js";
+import { isVirtualMode, getVirtualStatus, tickVirtualPositions, getVirtualPositionsAsReal, getVirtualWallet, virtualDeployPosition } from "./virtual-engine.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
@@ -218,8 +219,59 @@ export async function runManagementCycle({ silent = false } = {}) {
     if (!silent && telegramEnabled()) {
       liveMessage = await createLiveMessage("🔄 Management Cycle", "Evaluating positions...");
     }
-    const livePositions = await getMyPositions({ force: true }).catch(() => null);
-    positions = livePositions?.positions || [];
+
+    if (isVirtualMode()) {
+      log("cron", "Virtual mode ON — ticking virtual positions");
+      await tickVirtualPositions();
+      const virtualPositions = getVirtualPositionsAsReal();
+      positions = virtualPositions;
+      // Backfill: track any untracked virtual positions so SL/TP/OOR checks work
+      try {
+        const { trackPosition } = await import("./state.js");
+        for (const vp of positions) {
+          const tracked = getTrackedPosition(vp.position);
+          if (!tracked) {
+            trackPosition({
+              position: vp.position,
+              pool: vp.pool || vp.pair,
+              pool_name: vp.pair || String(vp.position),
+              strategy: vp.strategy || "bid_ask",
+              amount_sol: vp.deposit_amount || vp.total_value_usd || 0,
+              initial_value_usd: vp.total_value_usd || 0,
+            });
+            // Pre-set out_of_range_since if position is already OOR so the
+            // OOR close timer reflects actual OOR duration, not just since backfill
+            if (vp.in_range === false && vp._paper_summary?.in_range_pct != null && vp._paper_summary.in_range_pct < 100) {
+              try {
+                const statePath = (await import("./repo-root.js")).repoPath("state.json");
+                const fs = await import("fs");
+                const raw = JSON.parse(fs.readFileSync(statePath, "utf8"));
+                const p = raw.positions?.[vp.position];
+                if (p) {
+                  const oorMinutes = vp._paper_summary.in_range_pct > 0
+                    ? Math.round(vp.age_minutes * (1 - vp._paper_summary.in_range_pct / 100))
+                    : vp.age_minutes || 0;
+                  if (oorMinutes > 1) {
+                    p.out_of_range_since = new Date(Date.now() - oorMinutes * 60000).toISOString();
+                    fs.writeFileSync(statePath, JSON.stringify(raw, null, 2));
+                    log("cron", `Backfilled OOR since ${oorMinutes}m ago for virtual position ${vp.position}`);
+                  }
+                }
+              } catch (oorErr) {
+                log("cron_warn", `Failed to set OOR time for ${vp.position}: ${oorErr.message}`);
+              }
+            }
+            log("cron", `Backfilled tracking for virtual position ${vp.position}`);
+          }
+        }
+      } catch (err) {
+        log("cron_warn", `Failed to backfill virtual position tracking: ${err.message}`);
+      }
+      log("cron", `Virtual management: ${positions.length} virtual position(s) found`);
+    } else {
+      const livePositions = await getMyPositions({ force: true }).catch(() => null);
+      positions = livePositions?.positions || [];
+    }
 
     if (positions.length === 0) {
   if (!silent && telegramEnabled()) {
@@ -371,7 +423,7 @@ No open positions. Triggering screening cycle.`).catch(() => {});
       const actionBlocks = actionPositions.map((p) => {
         const act = actionMap.get(p.position);
         return [
-          `POSITION: ${p.pair} (${p.position})`,
+          `POSITION: ${p.position} (${p.pair})`,
           `  pool: ${p.pool}`,
           `  action: ${act.action}${act.rule && act.rule !== "exit" ? ` — Rule ${act.rule}: ${act.reason}` : ""}${act.rule === "exit" ? ` — ⚡ ${act.reason.replace(/:.*/, "")}` : ""}`,
           `  pnl_pct: ${p.pnl_pct}% | unclaimed_fees: ${cur}${p.unclaimed_fees_usd} | value: ${cur}${p.total_value_usd} | fee_per_tvl_24h: ${p.fee_per_tvl_24h ?? "?"}%`,
@@ -405,8 +457,9 @@ After executing, write a brief one-line result per position.
     }
 
     // Trigger screening after management
-    const afterPositions = await getMyPositions({ force: true }).catch(() => null);
-    const afterCount = afterPositions?.positions?.length ?? 0;
+    const afterCount = isVirtualMode()
+      ? getVirtualPositionsAsReal().length
+      : (await getMyPositions({ force: true }).catch(() => null))?.positions?.length ?? 0;
     if (afterCount < config.risk.maxPositions && Date.now() - _screeningLastTriggered > screeningCooldownMs) {
       log("cron", `Post-management: ${afterCount}/${config.risk.maxPositions} positions — triggering screening`);
       runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
@@ -423,7 +476,7 @@ After executing, write a brief one-line result per position.
         else sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
       }
       for (const p of positions) {
-        if (!p.in_range && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes) {
+        if (!p._is_virtual && !p.in_range && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes) {
           notifyOutOfRange({ pair: p.pair, minutesOOR: p.minutes_out_of_range }).catch(() => { });
         }
       }
@@ -454,7 +507,15 @@ Screening skipped — previous cycle still running`).catch(() => {});
   let liveMessage = null;
   let screenReport = null;
   try {
-    [prePositions, preBalance] = await Promise.all([getMyPositions({ force: true }), getWalletBalances()]);
+    if (isVirtualMode()) {
+      log("cron", "Virtual mode ON — using virtual positions and wallet for screening pre-check");
+      await tickVirtualPositions();
+      const virtualPositions = getVirtualPositionsAsReal();
+      prePositions = { total_positions: virtualPositions.length, positions: virtualPositions, wallet: "virtual" };
+      preBalance = getVirtualWallet();
+    } else {
+      [prePositions, preBalance] = await Promise.all([getMyPositions({ force: true }), getWalletBalances()]);
+    }
     if (prePositions.total_positions >= config.risk.maxPositions) {
       log("cron", `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`);
     if (!silent && telegramEnabled()) {
@@ -517,8 +578,18 @@ Screening skipped — max positions reached (${prePositions.total_positions}/${c
       + (activeStrategy ? `\nSTRATEGY CONTEXT: ${activeStrategy.name} — entry: ${activeStrategy.entry?.condition || "n/a"} | exit: ${activeStrategy.exit?.notes || "n/a"} | best for: ${activeStrategy.best_for}` : "");
 
     // Fetch top candidates, then recon each sequentially with a small delay to avoid 429s
+    const topCandidateOpts = { limit: 10 };
+    if (isVirtualMode()) {
+      // Pass virtual positions as occupied pools so we don't deploy into the same pool twice
+      const virtualPositions = getVirtualPositionsAsReal();
+      const vpools = new Set(virtualPositions.map((p) => p.pool).filter(Boolean));
+      const vmints = new Set(virtualPositions.map((p) => p.base_mint).filter(Boolean));
+      topCandidateOpts.occupiedPools = vpools;
+      topCandidateOpts.occupiedMints = vmints;
+      log("cron", `Virtual mode: passing ${vpools.size} occupied pools to getTopCandidates`);
+    }
     const topCandidates = await Promise.race([
-      getTopCandidates({ limit: 10 }),
+      getTopCandidates(topCandidateOpts),
       new Promise((_, reject) => setTimeout(() => reject(new Error("getTopCandidates timed out after 120s")), 120000)),
     ]).catch((e) => ({ _error: e.message }));
     if (topCandidates?._error) {
@@ -1242,7 +1313,8 @@ function formatConfigSnapshot() {
     `Intervals: manage ${config.schedule.managementIntervalMin}m | screen ${config.schedule.screeningIntervalMin}m`,
     `Volatility check: ${config.management.volatilityCheckEnabled ? "on" : "off"} | max drop ${config.management.maxVolatilityDropPct}%`,
     `SL cooldown: ${config.management.stopLossCooldownHours}h | neg PnL cooldown: ${config.management.negativePnlCooldownHours}h (threshold: ${config.management.negativePnlCooldownThreshold}%)`,
-    `HiveMind: ${isHiveMindEnabled() ? "enabled" : "disabled"}${config.hiveMind.agentId ? ` | ${config.hiveMind.agentId}` : ""}`, 
+    `HiveMind: ${isHiveMindEnabled() ? "enabled" : "disabled"}${config.hiveMind.agentId ? ` | ${config.hiveMind.agentId}` : ""}`,
+    `Virtual mode: ${config.virtual.mode ? "🟢 ON" : "⚪ OFF"}`, 
   ].join("\n");
 }
 
@@ -1260,6 +1332,7 @@ function parseConfigValue(raw) {
 
 function settingValue(key) {
   const values = {
+    virtualMode: config.virtual.mode,
     solMode: config.management.solMode,
     lpAgentRelayEnabled: config.api.lpAgentRelayEnabled,
     chartIndicatorsEnabled: config.indicators.enabled,
@@ -1499,7 +1572,7 @@ function renderSettingsMenu(page = "main") {
         settingButton("Source: GMGN", "cfg:set:screeningSource:gmgn"),
       ],
       [toggleButton("solMode", "SOL mode"), toggleButton("lpAgentRelayEnabled", "LPAgent relay")],
-      [toggleButton("trailingTakeProfit", "Trailing TP")],
+      [toggleButton("virtualMode", "Virtual mode"), toggleButton("trailingTakeProfit", "Trailing TP")],
       [settingButton("Show config", "cfg:show")],
     ];
   }
@@ -1699,7 +1772,8 @@ async function deployLatestCandidate(index) {
       throw new Error(`NO DEPLOY: only cached candidate ${candidate.name} is not worth deploying — ${skipReason}`);
     }
   }
-  const deployAmount = computeDeployAmount((await getWalletBalances()).sol);
+  const walletForDeploy = isVirtualMode() ? (await getVirtualWallet()).sol : (await getWalletBalances()).sol;
+  const deployAmount = computeDeployAmount(walletForDeploy);
   const binsBelow = computeBinsBelow(candidate.volatility);
   const result = await executeTool("deploy_position", {
     pool_address: candidate.pool,
@@ -1808,11 +1882,18 @@ async function telegramHandler(msg) {
 
   if (text === "/wallet" || text === "/status") {
     try {
-      const [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
+      let wallet, positions;
+      if (isVirtualMode()) {
+        wallet = getVirtualWallet();
+        positions = { total_positions: getVirtualPositionsAsReal().length };
+      } else {
+        [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
+      }
       const suffix = text === "/status" && positions.total_positions
         ? `\n\nUse /positions for the numbered list.`
         : "";
-      await sendMessage(`${formatWalletStatus(wallet, positions)}${suffix}`).catch(() => {});
+      const line = isVirtualMode() ? `🧪 VIRTUAL MODE\nWallet: ${wallet.sol.toFixed(2)} SOL (virtual)\nPositions: ${positions.total_positions} open` : formatWalletStatus(wallet, positions);
+      await sendMessage(`${line}${suffix}`).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
@@ -1826,7 +1907,8 @@ async function telegramHandler(msg) {
 
   if (text === "/positions") {
     try {
-      const { positions, total_positions } = await getMyPositions({ force: true });
+      const positionsResult = isVirtualMode() ? { positions: getVirtualPositionsAsReal(), total_positions: getVirtualPositionsAsReal().length } : await getMyPositions({ force: true });
+      const { positions, total_positions } = positionsResult;
       if (total_positions === 0) { await sendMessage("No open positions."); return; }
       const cur = config.management.solMode ? "◎" : "$";
       const lines = positions.map((p, i) => {
@@ -1844,7 +1926,7 @@ async function telegramHandler(msg) {
   if (poolMatch) {
     try {
       const idx = parseInt(poolMatch[1]) - 1;
-      const { positions } = await getMyPositions({ force: true });
+      const positions = isVirtualMode() ? getVirtualPositionsAsReal() : (await getMyPositions({ force: true })).positions;
       if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
       const pos = positions[idx];
       await sendMessage([

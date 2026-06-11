@@ -66,7 +66,7 @@ async function getConnection() {
 
 // ─── API helpers ──────────────────────────────────────────────────────────────
 
-async function fetchPoolConfig(poolAddress) {
+export async function fetchPoolConfig(poolAddress) {
   const res = await fetch(`${DLMM_API}/pools/${poolAddress}`);
   if (!res.ok) throw new Error(`Pool fetch failed: ${res.status}`);
   const d = await res.json();
@@ -267,7 +267,7 @@ export async function openPaperPosition({
   state.positions[id] = position;
   save(state);
 
-  log("paper_sim", `Opened paper position ${id}: ${position.pair} $${deposit_amount} [${lower_price}–${upper_price}] ${strategy_type}`);
+  log("paper_sim", `Opened paper position ${id}: ${position.pair} ◎${deposit_amount} [${lower_price}–${upper_price}] ${strategy_type}`);
   return formatSummary(position);
 }
 
@@ -320,7 +320,7 @@ export async function tickPaperPositions() {
       pos.candles_in_range = candles_in_range;
 
       state.positions[pos.id] = pos;
-      log("paper_sim", `${pos.id} ticked +${candles.length} candles | fees=$${pos.fees_earned} IL=$${pos.il_usd} netPnL=$${pos.net_pnl}`);
+      log("paper_sim", `${pos.id} ticked +${candles.length} candles | fees=◎${pos.fees_earned} IL=◎${pos.il_usd} netPnL=◎${pos.net_pnl}`);
     } catch (e) {
       log("paper_sim", `Tick failed for ${pos.id}: ${e.message}`);
     }
@@ -361,7 +361,7 @@ export function closePaperPosition(id) {
   state.positions[id] = pos;
   save(state);
 
-  log("paper_sim", `Closed paper position ${id}: netPnL=$${pos.net_pnl} fees=$${pos.fees_earned} IL=$${pos.il_usd}`);
+  log("paper_sim", `Closed paper position ${id}: netPnL=◎${pos.net_pnl} fees=◎${pos.fees_earned} IL=◎${pos.il_usd}`);
   return formatSummary(pos);
 }
 

@@ -24,6 +24,7 @@ import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../smart-wallets.js";
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
 import { config, reloadScreeningThresholds, MIN_SAFE_BINS_BELOW } from "../config.js";
+import { isVirtualMode, virtualDeployPosition, virtualClosePosition, virtualClaimFees, getVirtualWalletBalances, getVirtualPositionsAsReal, getPaperPosition } from "../virtual-engine.js";
 import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
 import { execSync, spawn } from "child_process";
@@ -450,6 +451,9 @@ const toolMap = {
       // SOL supertrend entry guard
       requireSolSupertrend: ["screening", "requireSolSupertrend"],
       solSupertrendTimeframe: ["screening", "solSupertrendTimeframe"],
+      // virtual
+      virtualMode: ["virtual", "mode"],
+      virtualInitialSol: ["virtual", "initialSol"],
     };
 
     const applied = {};
@@ -618,6 +622,62 @@ export async function executeTool(name, args) {
 
   // Strip model artifacts like "<|channel|>commentary" appended to tool names
   name = name.replace(/<.*$/, "").trim();
+
+  // ─── Virtual mode interception ────────────
+  if (isVirtualMode()) {
+    if (name === "deploy_position") {
+      log("virtual", `Intercepted deploy_position for virtual mode`);
+      return virtualDeployPosition(args);
+    }
+    if (name === "close_position") {
+      const posId = args?.position_address;
+      if (posId && posId.startsWith("paper-")) {
+        log("virtual", `Intercepted close_position for virtual mode: ${posId}`);
+        return virtualClosePosition(posId);
+      }
+    }
+    if (name === "claim_fees") {
+      const posId = args?.position_address;
+      if (posId && posId.startsWith("paper-")) {
+        log("virtual", `Intercepted claim_fees for virtual mode: ${posId}`);
+        return virtualClaimFees(posId);
+      }
+    }
+    if (name === "get_my_positions") {
+      log("virtual", `Intercepted get_my_positions for virtual mode`);
+      const virtualPositions = getVirtualPositionsAsReal();
+      return {
+        wallet: "virtual",
+        total_positions: virtualPositions.length,
+        positions: virtualPositions,
+        _virtual_mode: true,
+      };
+    }
+    if (name === "get_position_pnl") {
+      const posId = args?.position_address;
+      if (posId && posId.startsWith("paper-")) {
+        log("virtual", `Intercepted get_position_pnl for virtual mode: ${posId}`);
+        try {
+          const pos = getPaperPosition(posId);
+          const pnlPct = pos.deposit > 0 ? ((pos.net_pnl ?? 0) / pos.deposit) * 100 : 0;
+          return {
+            position: posId,
+            total_value_usd: pos.deposit + (pos.net_pnl ?? 0),
+            pnl_pct: +pnlPct.toFixed(2),
+            fees_earned: pos.fees_earned ?? 0,
+            net_pnl: pos.net_pnl ?? 0,
+            _virtual: true,
+          };
+        } catch (e) {
+          return { error: e.message };
+        }
+      }
+    }
+    if (name === "get_wallet_balance") {
+      log("virtual", `Intercepted get_wallet_balance for virtual mode`);
+      return getVirtualWalletBalances();
+    }
+  }
 
   // ─── Validate tool exists ─────────────────
   const fn = toolMap[name];
@@ -831,7 +891,10 @@ async function runSafetyChecks(name, args) {
       }
 
       // Check position count limit + duplicate pool guard — force fresh scan to avoid stale cache
-      const positions = await getMyPositions({ force: true });
+      // In virtual mode, use virtual positions instead of calling getMyPositions (which returns on-chain data)
+      const positions = isVirtualMode()
+        ? { total_positions: getVirtualPositionsAsReal().length, positions: getVirtualPositionsAsReal() }
+        : await getMyPositions({ force: true });
       if (positions.total_positions >= config.risk.maxPositions) {
         return {
           pass: false,
