@@ -553,7 +553,7 @@ export async function discoverPools({
  * Returns eligible pools for the agent to evaluate and pick from.
  * Hard filters applied in code, agent decides which to deploy into.
  */
-export async function getTopCandidates({ limit = 10 } = {}) {
+export async function getTopCandidates({ limit = 10, occupiedPools, occupiedMints } = {}) {
   const { config } = await import("../config.js");
   const source = String(config.screening.source || "meteora").toLowerCase();
   if (!["meteora", "gmgn"].includes(source)) {
@@ -567,16 +567,24 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   const filteredOut = Array.isArray(discovery.filtered_examples) ? [...discovery.filtered_examples] : [];
 
   // Exclude pools where the wallet already has an open position
-  const { getMyPositions } = await import("./dlmm.js");
-  log("gmgn", `getTopCandidates: importing dlmm.js done, calling getMyPositions...`);
-  const { positions } = await Promise.race([
-    getMyPositions(),
-    new Promise((resolve) => setTimeout(() => resolve({ positions: [] }), 15000)),
-  ]);
-  log("gmgn", `getTopCandidates: getMyPositions returned ${positions?.length ?? "?"} positions`);
-  const occupiedPools = new Set(positions.map((p) => p.pool));
-  const occupiedMints = new Set(positions.map((p) => p.base_mint).filter(Boolean));
-  const minTvl = Number(config.screening.minTvl ?? 0);
+  // Accept optional override (e.g. virtual positions) — avoids calling getMyPositions which
+  // returns real on-chain positions, not virtual ones
+  if (occupiedPools == null) {
+    const { getMyPositions } = await import("./dlmm.js");
+    log("gmgn", `getTopCandidates: importing dlmm.js done, calling getMyPositions...`);
+    const { positions } = await Promise.race([
+      getMyPositions(),
+      new Promise((resolve) => setTimeout(() => resolve({ positions: [] }), 15000)),
+    ]);
+    log("gmgn", `getTopCandidates: getMyPositions returned ${positions?.length ?? "?"} positions`);
+    occupiedPools = new Set(positions.map((p) => p.pool));
+    occupiedMints = new Set(positions.map((p) => p.base_mint).filter(Boolean));
+  } else {
+    log("gmgn", `getTopCandidates: using provided occupiedPools (${occupiedPools.size} pools, ${occupiedMints?.size ?? 0} mints)`);
+  }
+  const minTvl = source === "gmgn"
+    ? Number(config.gmgn.minTvl ?? config.screening.minTvl ?? 0)
+    : Number(config.screening.minTvl ?? 0);
   const maxTvl = config.screening.maxTvl == null ? null : Number(config.screening.maxTvl);
   const minFeeActiveTvlRatio = Number(config.screening.minFeeActiveTvlRatio ?? 0);
 

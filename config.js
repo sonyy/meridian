@@ -301,6 +301,11 @@ export const config = {
     ),
   },
 
+  virtual: {
+    mode: u.virtualMode === true || u.virtualMode === "true" || false,
+    initialSol: u.virtualInitialSol ?? 100,
+  },
+
   indicators: {
     enabled: indicatorUserConfig.enabled ?? false,
     entryPreset: indicatorUserConfig.entryPreset ?? "supertrend_break",
