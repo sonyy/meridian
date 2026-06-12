@@ -11,6 +11,7 @@
 
 import fs from "fs";
 import { log } from "./logger.js";
+import { config } from "./config.js";
 
 const STATE_FILE = "./paper-positions.json";
 const DLMM_API  = "https://dlmm.datapi.meteora.ag";
@@ -325,6 +326,12 @@ export async function tickPaperPositions() {
       pos.net_pnl          = fees_earned + il_usd;
       pos.candles_total    = candles_total;
       pos.candles_in_range = candles_in_range;
+
+      const netPnlPct = pos.deposit_amount > 0 ? (pos.net_pnl / pos.deposit_amount) * 100 : 0;
+      if (pos.peak_pnl_pct == null || netPnlPct > pos.peak_pnl_pct) {
+        pos.peak_pnl_pct = netPnlPct;
+      }
+      pos.trailing_active = pos.peak_pnl_pct >= (config.management?.trailingTriggerPct ?? 3);
 
       state.positions[pos.id] = pos;
       log("paper_sim", `${pos.id} ticked +${candles.length} candles | fees=◎${pos.fees_earned} IL=◎${pos.il_usd} netPnL=◎${pos.net_pnl}`);
