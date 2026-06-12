@@ -179,6 +179,7 @@ export const config = {
         requireBbPosition:        r.requireBbPosition        ?? null,
       };
     })(),
+    feeSource: gmgnValue("feeSource", "gmgnFeeSource", "gmgn"),
   },
 
   // ─── Position Management ────────────────
@@ -276,6 +277,14 @@ export const config = {
     url: nonEmptyString(u.agentMeridianApiUrl, process.env.AGENT_MERIDIAN_API_URL, DEFAULT_AGENT_MERIDIAN_API_URL),
     publicApiKey: nonEmptyString(u.publicApiKey, process.env.PUBLIC_API_KEY, DEFAULT_AGENT_MERIDIAN_PUBLIC_KEY),
     lpAgentRelayEnabled: u.lpAgentRelayEnabled ?? false,
+  },
+
+  // ─── PnL Fetcher / Poller (public infra: RPC + Meteora deposits + Jupiter) ──
+  pnl: {
+    rpcUrl: nonEmptyString(u.pnlRpcUrl, process.env.PNL_RPC_URL, "https://pump.helius-rpc.com"),
+    source: nonEmptyString(u.pnlSource, "rpc"),
+    pollIntervalSec: Number(u.pnlPollIntervalSec ?? 3),
+    depositCacheTtlSec: Number(u.pnlDepositCacheTtlSec ?? 300),
   },
 
   jupiter: {

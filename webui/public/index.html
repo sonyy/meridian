@@ -192,7 +192,7 @@
   <div class="header-right">
     <span id="modeBadge"></span>
     <span id="refreshTime"></span>
-    <button onclick="fetchData()" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 14px;cursor:pointer;font-size:12px;font-family:inherit;">↻</button>
+
   </div>
 </div>
 
@@ -206,8 +206,49 @@
 <div class="closed-wrap" id="closedWrap"></div>
 
 <script>
-let charts = [];
-let renderId = 0;
+function fmtSol(v) {
+  v = Number(v) || 0;
+  if (v === 0) return '0';
+  if (Math.abs(v) >= 0.0001) return v.toFixed(4);
+  if (Math.abs(v) >= 1e-9) return v.toExponential(2);
+  return '0';
+}
+let charts = new Map();  // positionId → Chart instance
+
+// Plugin: draw colored price markers on Y-axis
+Chart.register({
+  id: 'priceMarkers',
+  afterDraw(chart) {
+    try {
+      const markers = chart.options._markerPrices;
+      if (!markers || !markers.length) return;
+      const yScale = chart.scales.y;
+      if (!yScale || !chart.chartArea) return;
+      const ctx = chart.ctx;
+      const xLeft = Math.max(4, chart.chartArea.left + 4);
+      ctx.save();
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.font = '8px "IBM Plex Mono", monospace';
+      for (const m of markers) {
+        const yPos = yScale.getPixelForValue(m.price);
+        if (!Number.isFinite(yPos)) continue;
+        if (yPos < chart.chartArea.top - 2 || yPos > chart.chartArea.bottom + 2) continue;
+        const text = String(m.label);
+        const w = ctx.measureText(text).width + 5;
+        ctx.fillStyle = 'rgba(10,14,23,0.82)';
+        ctx.fillRect(xLeft - 2, yPos - 6, w, 12);
+        ctx.fillStyle = m.color;
+        ctx.shadowColor = 'rgba(0,0,0,0.7)';
+        ctx.shadowBlur = 3;
+        ctx.fillText(text, xLeft, yPos);
+      }
+      ctx.restore();
+    } catch (e) {
+      // keep chart alive if a marker is outside the current scale
+    }
+  }
+});
 
 function fetchData() {
   fetch('/api/positions')
@@ -220,10 +261,6 @@ function fetchData() {
 }
 
 function render(d) {
-  charts.forEach(c => c.destroy());
-  charts = [];
-  const curRenderId = ++renderId;
-
   // mode badge
   document.getElementById('modeBadge').innerHTML =
     d.config.virtualMode
@@ -236,7 +273,7 @@ function render(d) {
   document.getElementById('summary').innerHTML = `
     <div class="summary-card">
       <div class="label">Wallet</div>
-      <div class="value">${d.wallet.sol.toFixed(2)} <span style="font-size:12px;color:var(--text2)">SOL</span></div>
+      <div class="value">${d.wallet.sol.toFixed(4)} <span style="font-size:12px;color:var(--text2)">SOL</span></div>
     </div>
     <div class="summary-card">
       <div class="label">Deployed</div>
@@ -248,13 +285,13 @@ function render(d) {
     </div>
     <div class="summary-card">
       <div class="label">Total PnL</div>
-      <div class="value ${s.total_pnl_sol >= 0 ? 'green' : 'red'}">${s.total_pnl_sol >= 0 ? '+' : ''}${s.total_pnl_sol} <span style="font-size:12px;color:var(--text2)">SOL</span></div>
+      <div class="value ${s.total_pnl_sol > 0 ? 'green' : s.total_pnl_sol < 0 ? 'red' : ''}">${s.total_pnl_sol > 0 ? '+' : ''}${s.total_pnl_sol === 0 ? '0' : s.total_pnl_sol} <span style="font-size:12px;color:var(--text2)">SOL</span></div>
       <div class="sub">fees: ${s.total_fees_sol} SOL</div>
     </div>
     <div class="summary-card">
       <div class="label">Win Rate</div>
       <div class="value">${s.win_rate}%</div>
-      <div class="sub">${s.wins}W / ${s.losses}L</div>
+      <div class="sub">${s.wins}W / ${s.losses}L${s.break_even > 0 ? ` / ${s.break_even} BE` : ''}</div>
     </div>
   `;
 
@@ -262,22 +299,57 @@ function render(d) {
   const c = d.config;
   document.getElementById('configBar').innerHTML = `
     <span class="config-tag">strategy <strong>${c.strategy}</strong></span>
+    <span class="config-tag">bins <strong>${c.minBinsBelow ?? '?'}–${c.maxBinsBelow ?? '?'}</strong></span>
+    <span class="config-tag">bin step <strong>${c.minBinStep ?? '?'}–${c.maxBinStep ?? '?'}</strong></span>
     <span class="config-tag">SL <strong>${c.stopLossPct}%</strong></span>
     <span class="config-tag">TP <strong>${c.takeProfitPct}%</strong></span>
-    <span class="config-tag">trailing <strong>${c.trailingTakeProfit ? 'ON' : 'OFF'}</strong></span>
-    <span class="config-tag">OOR wait <strong>${c.outOfRangeWaitMinutes}m</strong></span>
+    <span class="config-tag">trailing <strong>${c.trailingTakeProfit ? `ON (trg ${c.trailingTriggerPct}%, drop ${c.trailingDropPct}%)` : 'OFF'}</strong></span>
+    <span class="config-tag">OOR <strong>${c.outOfRangeWaitMinutes}m</strong></span>
     <span class="config-tag">deploy <strong>${c.deployAmountSol} SOL</strong></span>
+    <span class="config-tag">gas <strong>${c.gasReserve} SOL</strong></span>
+    <span class="config-tag">size <strong>${(c.positionSizePct * 100)}%</strong></span>
+    <span class="config-tag">max <strong>${c.maxDeployAmount} SOL</strong></span>
   `;
 
-  // open positions
+  // === open positions (DOM diff — preserve canvas elements) ===
+  const container = document.getElementById('openPositions');
   const openList = d.open || [];
   document.getElementById('openCount').textContent = openList.length;
-  document.getElementById('openPositions').innerHTML =
-    openList.length === 0
-      ? '<div class="no-data">no open positions</div>'
-      : openList.map((p, i) => renderCard(p, i, c)).join('');
 
-  // closed
+  if (openList.length === 0) {
+    container.innerHTML = '<div class="no-data">no open positions</div>';
+    charts.forEach((ch, pid) => { ch.destroy(); });
+    charts.clear();
+  } else {
+    const openPids = new Set(openList.map(p => p.id));
+
+    // Remove cards for positions no longer open
+    Array.from(container.children).forEach(child => {
+      if (child.dataset && child.dataset.pid && !openPids.has(child.dataset.pid)) {
+        const ch = charts.get(child.dataset.pid);
+        if (ch) { ch.destroy(); charts.delete(child.dataset.pid); }
+        child.remove();
+      }
+    });
+
+    // Update or create cards
+    openList.forEach((p, i) => {
+      let card = container.querySelector(`[data-pid="${p.id}"]`);
+      if (card) {
+        // Preserve canvas before metadata refresh
+        const oldCanvas = card.querySelector('.chart-wrap canvas');
+        card.innerHTML = renderCard(p, c);
+        if (oldCanvas) card.querySelector('.chart-wrap').appendChild(oldCanvas);
+      } else {
+        card = document.createElement('div');
+        card.dataset.pid = p.id;
+        card.innerHTML = renderCard(p, c);
+        container.appendChild(card);
+      }
+    });
+  }
+
+  // closed trades (no charts, innerHTML fine)
   const closedList = d.closed || [];
   document.getElementById('closedCount').textContent = closedList.length;
 
@@ -287,38 +359,41 @@ function render(d) {
     document.getElementById('closedWrap').innerHTML =
       `<table class="closed-table">
         <thead><tr>
-          <th>Pair</th><th>Deposit</th><th>PnL</th><th>Fees</th><th>Duration</th><th>Close</th>
+          <th>Pair</th><th>Deposit</th><th>PnL</th><th>Fees</th><th>IL</th><th>Duration</th><th>Exit Reason</th><th>Open</th><th>Close</th>
         </tr></thead>
         <tbody>
           ${closedList.map(p => `
             <tr>
-              <td style="font-weight:500">${p.pair}</td>
+              <td style="font-weight:500"><a href="https://gmgn.ai/sol/token/${p.token_mint || ''}" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:none">${p.pair}</a></td>
               <td>${p.deposit?.toFixed(2)} SOL</td>
               <td style="color:${(p.pnl_pct||0) >= 0 ? 'var(--green)' : 'var(--red)'}">${(p.pnl_pct||0) >= 0 ? '+' : ''}${p.pnl_pct?.toFixed(1)}% (${(p.net_pnl||0) >= 0 ? '+' : ''}${p.net_pnl?.toFixed(4)})</td>
-              <td>${(p.fees_earned||0).toFixed(4)} SOL</td>
+              <td>${fmtSol(p.fees_earned)} SOL</td>
+              <td style="color:${(p.il_usd||0) < 0 ? 'var(--red)' : 'var(--text2)'}">${fmtSol(p.il_usd)}</td>
               <td>${p.duration_hours?.toFixed(1) || '-'}h</td>
-              <td>${p.closed_at ? new Date(p.closed_at).toLocaleDateString() : '-'}</td>
+              <td style="color:var(--text2);font-size:11px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(p.close_reason||'').replace(/"/g,'&quot;')}">${p.close_reason || '-'}</td>
+              <td style="font-size:11px">${p.opened_at ? new Date(p.opened_at).toLocaleString() : '-'}</td>
+              <td style="font-size:11px">${p.closed_at ? new Date(p.closed_at).toLocaleString() : '-'}</td>
             </tr>
           `).join('')}
         </tbody>
       </table>`;
   }
 
-  // draw charts
-  openList.forEach((p, i) => drawChart(p, i, c, curRenderId));
+  // draw/update charts
+  openList.forEach((p, i) => drawChart(p, i, c));
 }
 
-function renderCard(p, i, c) {
+function renderCard(p, c) {
   const pnlClass = (p.pnl_pct || 0) >= 0 ? 'green' : 'red';
   const oorClass = p.in_range ? 'in' : 'out';
   const oorLabel = p.in_range ? 'IN' : p.minutes_out_of_range != null ? `OOR ${p.minutes_out_of_range}m` : 'OOR';
   const dur = p.duration_hours != null ? `${p.duration_hours.toFixed(1)}h` : '-';
 
   return `
-    <div class="card" id="card-${i}">
+    <div class="card" data-pid="${p.id}">
       <div class="card-header">
         <div class="pair">
-          ${p.pair}
+          <a href="https://gmgn.ai/sol/token/${p.token_mint || ''}" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:none;border-bottom:1px dotted rgba(255,255,255,0.2)">${p.pair}</a>
           <span class="oor-badge ${oorClass}">${oorLabel}</span>
         </div>
         <div class="pnl-big ${pnlClass}">${(p.pnl_pct||0) >= 0 ? '+' : ''}${(p.pnl_pct||0).toFixed(2)}%</div>
@@ -328,34 +403,42 @@ function renderCard(p, i, c) {
           <span class="m-label">strategy</span><span class="m-value">${p.strategy || '-'}</span>
           <span class="m-label">deposit</span><span class="m-value">${(p.deposit||0).toFixed(2)} SOL</span>
           <span class="m-label">net PnL</span><span class="m-value ${pnlClass}">${(p.net_pnl||0) >= 0 ? '+' : ''}${(p.net_pnl||0).toFixed(4)} SOL</span>
-          <span class="m-label">fees earned</span><span class="m-value">${(p.fees_earned||0).toFixed(4)} SOL</span>
+          <span class="m-label">fees earned</span><span class="m-value">${fmtSol(p.fees_earned)} SOL</span>
           <span class="m-label">fee APR</span><span class="m-value">${p.annualized_fee_apr != null ? p.annualized_fee_apr.toFixed(1) + '%' : '-'}</span>
-          <span class="m-label">IL</span><span class="m-value">${(p.il_usd||0).toFixed(4)} SOL</span>
+          <span class="m-label">IL</span><span class="m-value">${fmtSol(p.il_usd)} SOL</span>
           <span class="m-label">age</span><span class="m-value">${dur}</span>
+          <span class="m-label">trailing</span><span class="m-value">${p.trailing_active ? `🟢 peak ${(p.peak_pnl_pct||0).toFixed(1)}%` : '−'}</span>
           <span class="m-label">candles</span><span class="m-value">${p.candles_total || 0}</span>
         </div>
-        <div class="chart-wrap">
-          <canvas id="chart-${i}"></canvas>
+        <div style="margin-top:8px">
+          <div class="chart-wrap"></div>
+          <div class="range-bar-wrap"></div>
         </div>
-        <div class="range-bar-wrap" id="range-${i}"></div>
       </div>
     </div>
   `;
 }
 
-function drawChart(p, i, c, curRenderId) {
-  const canvas = document.getElementById(`chart-${i}`);
-  if (!canvas) return;
+function drawChart(p, i, c) {
+  const card = document.querySelector(`[data-pid="${p.id}"]`);
+  if (!card) return;
+  const chartWrap = card.querySelector('.chart-wrap');
+  if (!chartWrap) return;
+
+  // Create canvas once; reuse on subsequent renders
+  let canvas = chartWrap.querySelector('canvas');
+  if (!canvas) {
+    canvas = document.createElement('canvas');
+    chartWrap.appendChild(canvas);
+  }
   const ctx = canvas.getContext('2d');
 
   const entryPrice = p.entry_price || 1;
   const price = p.last_price || entryPrice;
-  const rawLower = p.range_lower || price * 0.5;
-  const rawUpper = p.range_upper || price * 1.5;
-  // klineScale aligns position price scale with kline market price scale
-  let klineScale = 1;
+  const lower = p.range_lower || price * 0.5;
+  const upper = p.range_upper || price * 1.5;
   const tokenSymbol = (p.chart_token || p.pair?.split('-')[0] || '').toUpperCase();
-  const cacheKey = `kline_${tokenSymbol}`;
+  const cacheKey = `kline_${p.id}`;
 
   let cachedRaw = sessionStorage.getItem(cacheKey);
   let cached = cachedRaw ? JSON.parse(cachedRaw) : null;
@@ -363,7 +446,7 @@ function drawChart(p, i, c, curRenderId) {
   if (cached && Date.now() - (cached._cachedAt || 0) < 120000) {
     klinePromise = Promise.resolve(cached);
   } else {
-    klinePromise = fetch(`/api/kline/${tokenSymbol}`).then(r => r.json()).then(d => {
+    klinePromise = fetch(`/api/kline/${tokenSymbol}?position=${p.id}`).then(r => r.json()).then(d => {
         if (d.candles && d.candles.length) {
           d._cachedAt = Date.now();
           sessionStorage.setItem(cacheKey, JSON.stringify(d));
@@ -374,19 +457,22 @@ function drawChart(p, i, c, curRenderId) {
   }
 
   klinePromise.then(kd => {
-    if (curRenderId !== renderId) return;
+    // Update OOR badge from chart data (last candle close vs range)
+    const badge = card.querySelector('.oor-badge');
+    if (badge && kd && kd.candles && kd.candles.length > 0) {
+      const lastCdl = kd.candles[kd.candles.length - 1];
+      const chartClose = parseFloat(lastCdl.close || lastCdl.c);
+      if (!isNaN(chartClose) && lower > 0 && upper > 0) {
+        const chartInRange = chartClose >= lower && chartClose <= upper;
+        badge.className = 'oor-badge ' + (chartInRange ? 'in' : 'out');
+        badge.textContent = chartInRange ? 'IN' : 'OOR';
+      }
+    }
 
     const prices = [];
     const labels = [];
     let minP = Infinity, maxP = -Infinity;
-    let firstClose = 0;
-
     if (kd && kd.candles && kd.candles.length > 2) {
-      // Determine kline scale from first candle vs entry_price
-      firstClose = parseFloat(kd.candles[0].close || kd.candles[0].c) || 0;
-      if (entryPrice > 0 && firstClose > 0) klineScale = firstClose / entryPrice;
-
-      // sample down to ~60 points max
       const step = Math.max(1, Math.floor(kd.candles.length / 60));
       for (let idx = 0; idx < kd.candles.length; idx += step) {
         const cdl = kd.candles[idx];
@@ -412,144 +498,154 @@ function drawChart(p, i, c, curRenderId) {
       maxP = Math.max(...prices);
     }
 
-    // Scale range values to match kline price scale
-    const lower = rawLower * klineScale;
-    const upper = rawUpper * klineScale;
-
-    // Y-axis spans all data (price + scaled range)
     const overallMin = Math.min(minP, lower);
     const overallMax = Math.max(maxP, upper);
     const overallSpan = overallMax - overallMin || 1;
     let yMin = overallMin - overallSpan * 0.08;
     let yMax = overallMax + overallSpan * 0.08;
-    // log scale requires positive yMin
     if (yMin <= 0) yMin = overallMin * 0.5;
 
-    // destroy stale chart for this position index
-    if (charts[i]) { charts[i].destroy(); }
+    const markerPrices = [
+      { price: upper, label: upper.toExponential(3), color: '#f59e0b' },
+      { price: entryPrice, label: entryPrice.toExponential(3), color: 'rgba(96,165,250,0.7)' },
+      { price: prices.length > 1 ? prices[prices.length - 1] : price, label: (prices.length > 1 ? prices[prices.length - 1] : price).toExponential(3), color: '#34d399' },
+      { price: lower, label: lower.toExponential(3), color: '#f59e0b' },
+    ];
 
-    const ch = new Chart(ctx, {
-      type: 'line',
-      data: {
-        labels,
-        datasets: [
-          // 0: range fill band (amber between lower→upper) — fill to dataset index 3
-          {
-            data: prices.map(() => lower),
-            borderWidth: 0,
-            pointRadius: 0,
-            fill: 3,
-            backgroundColor: 'rgba(251,191,36,0.12)',
-          },
-          // 1: price line
-          {
-            data: prices,
-            borderColor: '#34d399',
-            borderWidth: 1.5,
-            pointRadius: 0,
-            pointHitRadius: 3,
-            fill: false,
-            tension: 0.1,
-          },
-          // 2: range lower line
-          {
-            data: prices.map(() => lower),
-            borderColor: '#f59e0b',
-            borderWidth: 2,
-            pointRadius: 0,
-            fill: false,
-          },
-          // 3: range upper line
-          {
-            data: prices.map(() => upper),
-            borderColor: '#f59e0b',
-            borderWidth: 2,
-            pointRadius: 0,
-            fill: false,
-          },
-          // 4: entry price (scaled to kline prices)
-          {
-            data: prices.map(() => entryPrice * klineScale),
-            borderColor: 'rgba(96,165,250,0.5)',
-            borderWidth: 1.5,
-            borderDash: [3, 3],
-            pointRadius: 0,
-            fill: false,
-          },
-        ],
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        animation: false,
-        plugins: { legend: { display: false }, tooltip: { enabled: false } },
-        scales: {
-          x: {
-            display: true,
-            ticks: {
-              color: '#888b98',
-              font: { size: 8, family: 'IBM Plex Mono' },
-              maxTicksLimit: 6,
-              maxRotation: 0,
-            },
-            grid: { display: false },
-          },
-          y: {
-            type: 'logarithmic',
-            display: true,
-            min: yMin,
-            max: yMax,
-            ticks: {
-              color: '#888b98',
-              font: { size: 9, family: 'IBM Plex Mono' },
-              callback: v => v.toExponential(2),
-              maxTicksLimit: 5,
-            },
-            grid: { color: 'rgba(36,40,52,0.6)', drawBorder: false },
-          },
+    // Update existing chart data in-place OR create new chart
+    let ch = charts.get(p.id);
+    if (ch && ch.canvas === canvas) {
+      // Update data + scales without destroy — zero flicker
+      ch.data.labels = labels;
+      ch.data.datasets[0].data = prices.map(() => lower);
+      ch.data.datasets[1].data = prices;
+      ch.data.datasets[2].data = prices.map(() => lower);
+      ch.data.datasets[3].data = prices.map(() => upper);
+      ch.data.datasets[4].data = prices.map(() => entryPrice);
+      ch.options.scales.y.min = yMin;
+      ch.options.scales.y.max = yMax;
+      ch.options._markerPrices = markerPrices;
+      ch.update('none');
+    } else {
+      // Canvas changed or new position — destroy stale instance, create fresh
+      if (ch) ch.destroy();
+      ch = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [
+            { data: prices.map(() => lower), borderWidth: 0, pointRadius: 0, fill: 3, backgroundColor: 'rgba(251,191,36,0.12)' },
+            { data: prices, borderColor: '#34d399', borderWidth: 1.5, pointRadius: 0, pointHitRadius: 3, fill: false, tension: 0.1 },
+            { data: prices.map(() => lower), borderColor: '#f59e0b', borderWidth: 2, pointRadius: 0, fill: false },
+            { data: prices.map(() => upper), borderColor: '#f59e0b', borderWidth: 2, pointRadius: 0, fill: false },
+            { data: prices.map(() => entryPrice), borderColor: 'rgba(96,165,250,0.5)', borderWidth: 1.5, borderDash: [3, 3], pointRadius: 0, fill: false },
+          ],
         },
-        interaction: { intersect: false, mode: 'index' },
-      },
-    });
-    charts[i] = ch;
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: { legend: { display: false }, tooltip: { enabled: false } },
+          _markerPrices: markerPrices,
+          scales: {
+            x: {
+              display: true,
+              ticks: { color: '#888b98', font: { size: 8, family: 'IBM Plex Mono' }, maxTicksLimit: 6, maxRotation: 0 },
+              grid: { display: false },
+            },
+            y: {
+              type: 'logarithmic', display: true, min: yMin, max: yMax,
+              ticks: { display: false, color: '#888b98', font: { size: 9, family: 'IBM Plex Mono' }, callback: v => v.toExponential(2), maxTicksLimit: 5 },
+              grid: { color: 'rgba(36,40,52,0.6)', drawBorder: false },
+            },
+          },
+          interaction: { intersect: false, mode: 'index' },
+        },
+      });
+      charts.set(p.id, ch);
+    }
 
-    // range bar below chart (use scaled lower/upper)
-    const rangeEl = document.getElementById(`range-${i}`);
+    // range bar (update in-place — no innerHTML flicker)
+    const rangeEl = card.querySelector('.range-bar-wrap');
     if (rangeEl) {
-      const curPrice = prices.length > 1 ? prices[prices.length - 1] : price * klineScale;
+      const curPrice = prices.length > 1 ? prices[prices.length - 1] : price;
       const rLower = lower;
       const rUpper = upper;
       const totalSpan = (rUpper - rLower) || 1;
-      const loPct = 0;
-      const hiPct = 100;
-      const curPct = ((curPrice - rLower) / totalSpan) * 100;
+      const curPct = Math.min(Math.max(((curPrice - rLower) / totalSpan) * 100, 0), 100);
 
-      // SL/TP in kline scale
-      const scaledEntry = entryPrice * klineScale;
+      const scaledEntry = entryPrice;
       const slPrice = scaledEntry ? scaledEntry * (1 + (c.stopLossPct || -20) / 100) : null;
       const tpPrice = scaledEntry ? scaledEntry * (1 + (c.takeProfitPct || 10) / 100) : null;
       const slPct = slPrice != null && totalSpan > 0 ? ((slPrice - rLower) / totalSpan) * 100 : null;
       const tpPct = tpPrice != null && totalSpan > 0 ? ((tpPrice - rLower) / totalSpan) * 100 : null;
 
-      rangeEl.innerHTML = `
-        <div class="range-fill" style="left:${loPct}%;width:${hiPct - loPct}%">
-          <span class="range-label l">${rLower.toExponential(2)}</span>
-          <span class="range-label r">${rUpper.toExponential(2)}</span>
-        </div>
-        ${slPct != null && slPct >= 0 && slPct <= 100 ? `
-          <div class="sl-tp-line sl" style="left:${slPct}%"></div>
-          <span style="position:absolute;top:1px;left:${slPct}%;transform:translateX(calc(-100% - 2px));font-size:7px;font-family:'IBM Plex Mono',monospace;color:var(--red);z-index:3;line-height:12px;">SL</span>
-        ` : ''}
-        ${tpPct != null && tpPct >= 0 && tpPct <= 100 ? `
-          <span style="position:absolute;top:1px;left:${tpPct}%;transform:translateX(calc(-100% - 2px));font-size:7px;font-family:'IBM Plex Mono',monospace;color:var(--green);z-index:3;line-height:12px;">TP</span>
-          <div class="sl-tp-line tp" style="left:${tpPct}%"></div>
-        ` : ''}
-        <div style="position:absolute;bottom:0;left:${Math.min(Math.max(curPct,0),100)}%;width:1.5px;height:100%;background:var(--blue);z-index:5;"></div>
-        <div style="position:absolute;top:0;left:${Math.min(Math.max(curPct,0),100)}%;transform:translateX(-50%);width:0;height:0;border-left:3px solid transparent;border-right:3px solid transparent;border-top:5px solid var(--blue);z-index:5;"></div>
-        <span style="position:absolute;bottom:0;left:${Math.min(Math.max(curPct,0),100)}%;transform:translateX(2px);font-size:7px;font-family:'IBM Plex Mono',monospace;color:var(--blue);z-index:5;line-height:10px;white-space:nowrap;">${curPrice.toExponential(3)}</span>
-      `;
+      renderRangeBar(rangeEl, {
+        lower: rLower,
+        upper: rUpper,
+        curPrice,
+        curPct,
+        slPct,
+        tpPct,
+      });
     }
   });
+}
+
+function renderRangeBar(rangeEl, data) {
+  const fill = ensureRangeChild(rangeEl, '.range-fill', 'div', 'range-fill', { position: 'absolute', top: '0', height: '100%', background: 'var(--green-dim)', borderLeft: '2px solid var(--green)', borderRight: '2px solid var(--green)', borderRadius: '2px' });
+  const labelL = ensureRangeChild(rangeEl, '.range-label.l', 'span', 'range-label l', { position: 'absolute', top: '50%', transform: 'translateY(-50%)', fontSize: '9px', fontFamily: "'IBM Plex Mono', monospace", color: 'var(--text2)', whiteSpace: 'nowrap' });
+  const labelR = ensureRangeChild(rangeEl, '.range-label.r', 'span', 'range-label r', { position: 'absolute', top: '50%', transform: 'translateY(-50%)', fontSize: '9px', fontFamily: "'IBM Plex Mono', monospace", color: 'var(--text2)', whiteSpace: 'nowrap' });
+  const slLine = ensureRangeChild(rangeEl, '.sl-tp-line.sl', 'div', 'sl-tp-line sl', { position: 'absolute', top: '0', width: '1.5px', height: '100%', background: 'var(--red)', zIndex: '4' });
+  const slLabel = ensureRangeChild(rangeEl, '.range-label.sl', 'span', 'range-label sl', { position: 'absolute', top: '1px', fontSize: '7px', fontFamily: "'IBM Plex Mono', monospace", color: 'var(--red)', zIndex: '5', lineHeight: '12px' });
+  const tpLine = ensureRangeChild(rangeEl, '.sl-tp-line.tp', 'div', 'sl-tp-line tp', { position: 'absolute', top: '0', width: '1.5px', height: '100%', background: 'var(--green)', zIndex: '4' });
+  const tpLabel = ensureRangeChild(rangeEl, '.range-label.tp', 'span', 'range-label tp', { position: 'absolute', top: '1px', fontSize: '7px', fontFamily: "'IBM Plex Mono', monospace", color: 'var(--green)', zIndex: '5', lineHeight: '12px' });
+  const cursorLine = ensureRangeChild(rangeEl, '.cursor-line', 'div', 'cursor-line', { position: 'absolute', bottom: '0', width: '1.5px', height: '100%', background: 'var(--blue)', zIndex: '5' });
+  const cursorTri = ensureRangeChild(rangeEl, '.cursor-triangle', 'div', 'cursor-triangle', { position: 'absolute', top: '0', width: '0', height: '0', borderLeft: '3px solid transparent', borderRight: '3px solid transparent', borderTop: '5px solid var(--blue)', zIndex: '5' });
+  const cursorLabel = ensureRangeChild(rangeEl, '.cursor-price', 'span', 'cursor-price', { position: 'absolute', bottom: '0', fontSize: '7px', fontFamily: "'IBM Plex Mono', monospace", color: 'var(--blue)', zIndex: '5', lineHeight: '10px', whiteSpace: 'nowrap' });
+
+  fill.style.left = '0%';
+  fill.style.width = '100%';
+  labelL.style.left = '4px';
+  labelL.textContent = data.lower.toExponential(2);
+  labelR.style.right = '4px';
+  labelR.textContent = data.upper.toExponential(2);
+
+  const slVisible = data.slPct != null && data.slPct >= 0 && data.slPct <= 100;
+  slLine.style.display = slVisible ? 'block' : 'none';
+  slLabel.style.display = slVisible ? 'block' : 'none';
+  if (slVisible) {
+    slLine.style.left = `${data.slPct}%`;
+    slLabel.style.left = `${data.slPct}%`;
+    slLabel.style.transform = 'translateX(calc(-100% - 2px))';
+    slLabel.textContent = 'SL';
+  }
+
+  const tpVisible = data.tpPct != null && data.tpPct >= 0 && data.tpPct <= 100;
+  tpLine.style.display = tpVisible ? 'block' : 'none';
+  tpLabel.style.display = tpVisible ? 'block' : 'none';
+  if (tpVisible) {
+    tpLine.style.left = `${data.tpPct}%`;
+    tpLabel.style.left = `${data.tpPct}%`;
+    tpLabel.style.transform = 'translateX(calc(-100% - 2px))';
+    tpLabel.textContent = 'TP';
+  }
+
+  cursorLine.style.left = `${data.curPct}%`;
+  cursorTri.style.left = `${data.curPct}%`;
+  cursorTri.style.transform = 'translateX(-50%)';
+  cursorLabel.style.left = `${data.curPct}%`;
+  cursorLabel.style.transform = 'translateX(2px)';
+  cursorLabel.textContent = data.curPrice.toExponential(3);
+}
+
+function ensureRangeChild(parent, selector, tag, className, style) {
+  let el = parent.querySelector(selector);
+  if (!el) {
+    el = document.createElement(tag);
+    el.className = className;
+    Object.assign(el.style, style);
+    parent.appendChild(el);
+  }
+  return el;
 }
 
 fetchData();

@@ -2,7 +2,9 @@ import express from "express";
 import { createServer } from "http";
 import path from "path";
 import { fileURLToPath } from "url";
-import { execSync } from "child_process";
+import { exec } from "child_process";
+import { promisify } from "util";
+const execAsync = promisify(exec);
 import { log } from "../logger.js";
 import { config } from "../config.js";
 
@@ -18,14 +20,40 @@ const TOKEN_MINTS = {
   PARQ: "VtwGKv7dcpY7aFb8H7MvZfEtUAKwtsHcXSkejCAparq",
   BOUNTYWORK: "J4x1EMmQjF6WEzXq2tUtzY89x5aMhYz5CzfevcJEpump",
   POKE: "FADNLNo4xc8ot3bcgbHFQuuSKg93jKfpR8pcCR76pump",
+  MAGPIE: "9UuLsJ3jf8ViBNeRcwXD53re5G3ypgfKK3s2EiMMpump",
+  DUCK: "236ziZWiNPWeNk8aNB7abJpv4A6vHNP2XpxHH9VUpump",
 };
 // lowercase alias
 for (const [k, v] of Object.entries(TOKEN_MINTS)) {
   TOKEN_MINTS[k.toLowerCase()] = v;
 }
 
+const _mintCache = {};
+async function resolveMint(symbol) {
+  const upper = symbol.toUpperCase();
+  if (TOKEN_MINTS[upper]) return TOKEN_MINTS[upper];
+  if (_mintCache[upper]) return _mintCache[upper];
+  try {
+    const paperMod = await import("../paper-positions.js");
+    const allPaper = paperMod.listPaperPositions();
+    const pos = allPaper.find(p => p.pair?.split("-")[0]?.toUpperCase() === upper && p.pool_address);
+    if (pos?.pool_address) {
+      const res = await fetch(`https://dlmm.datapi.meteora.ag/pools/${pos.pool_address}`);
+      if (res.ok) {
+        const data = await res.json();
+        const mint = data.token_x?.address;
+        if (mint) {
+          _mintCache[upper] = mint;
+          return mint;
+        }
+      }
+    }
+  } catch {}
+  return null;
+}
+
 // ── Earliest deploy time (1h before first position) ────────────────────
-const DEPLOY_START = new Date("2026-06-10T04:00:00.000Z"); // 1h before first deploy
+const DEPLOY_START = new Date("2026-06-01T00:00:00.000Z"); // start of pool history (pool created June 2)
 
 async function fetchKlineAll(mint, fromTs, toTs) {
   const WINDOW = 500 * 60;
@@ -33,40 +61,122 @@ async function fetchKlineAll(mint, fromTs, toTs) {
   let cur = fromTs;
   while (cur < toTs) {
     const end = Math.min(cur + WINDOW, toTs);
-    const raw = execSync(
-      `gmgn-cli market kline --chain sol --address ${mint} --resolution 5m --from ${cur} --to ${end} --raw 2>/dev/null`,
-      { timeout: 15000, encoding: "utf8" }
-    ).trim();
-    let chunk;
-    try { chunk = JSON.parse(raw); } catch { chunk = []; }
-    const list = Array.isArray(chunk) ? chunk : (chunk.list || []);
-    all.push(...list);
-    if (list.length === 0) break;
-    const last = Number(list[list.length - 1].time || list[list.length - 1].t);
-    cur = Math.max(cur + 1, Math.floor(last / 1000));
+    try {
+      const { stdout } = await execAsync(
+        `gmgn-cli market kline --chain sol --address ${mint} --resolution 5m --from ${cur} --to ${end} --raw 2>/dev/null`,
+        { timeout: 15000, encoding: "utf8" }
+      );
+      const raw = stdout.trim();
+      let chunk;
+      try { chunk = JSON.parse(raw); } catch { chunk = []; }
+      const list = Array.isArray(chunk) ? chunk : (chunk.list || []);
+      all.push(...list);
+      if (list.length === 0) break;
+      const last = Number(list[list.length - 1].time || list[list.length - 1].t);
+      cur = Math.max(cur + 1, Math.floor(last / 1000));
+    } catch {
+      break;
+    }
   }
   return all;
+}
+
+const DLMM_API = "https://dlmm.datapi.meteora.ag";
+
+async function fetchKlineFromMeteora(symbol, fromTs, toTs) {
+  try {
+    const paperMod = await import("../paper-positions.js");
+    const allPaper = paperMod.listPaperPositions();
+    const pos = allPaper.find(p => {
+      const sym = p.pair?.split("-")[0]?.toUpperCase();
+      return sym === symbol.toUpperCase();
+    });
+    if (!pos?.pool_address) return [];
+    const base = `${DLMM_API}/pools/${pos.pool_address}/ohlcv?timeframe=5m`;
+    const limit = 500; // safety cap
+    const allCandles = [];
+
+    // Page backwards from now: each batch returns up to 10 candles,
+    // use earliest timestamp as next end_time (exclusive).
+    let endTime = null;
+    for (let i = 0; i < 20 && allCandles.length < limit; i++) {
+      const url = endTime ? `${base}&end_time=${endTime}` : base;
+      const resp = await fetch(url, { timeout: 10000 });
+      if (!resp.ok) break;
+      const data = await resp.json();
+      const raw = data?.data ?? [];
+      if (!raw.length) break;
+      allCandles.push(...raw);
+      endTime = raw[0].timestamp; // earliest in this batch is next cursor
+      if (endTime <= fromTs) break; // reached requested start time
+    }
+
+    // Dedup by timestamp, sort ascending, filter to range
+    const seen = new Set();
+    return allCandles
+      .filter(c => {
+        if (seen.has(c.timestamp)) return false;
+        seen.add(c.timestamp);
+        return c.timestamp >= fromTs && c.timestamp <= toTs;
+      })
+      .sort((a, b) => a.timestamp - b.timestamp)
+      .map(c => ({
+        t: c.timestamp * 1000,
+        o: String(c.open),
+        h: String(c.high),
+        l: String(c.low),
+        c: String(c.close),
+        v: String(c.volume ?? 0),
+      }));
+  } catch {
+    return [];
+  }
 }
 
 app.get("/api/kline/:symbol", async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();
-    const mint = TOKEN_MINTS[symbol] || TOKEN_MINTS[symbol.toLowerCase()];
+    const mint = await resolveMint(symbol);
     if (!mint) return res.status(404).json({ error: `Unknown token: ${symbol}` });
 
-    let fromTs = Math.floor(DEPLOY_START.getTime() / 1000);
+    const toTs = req.query.to ? parseInt(req.query.to, 10) : Math.floor(Date.now() / 1000);
+    let fromTs = toTs - 6 * 3600;
+    if (req.query.from) fromTs = parseInt(req.query.from, 10);
+
+    // Try Meteora first (same source as simulation) when position given
+    let candles;
     if (req.query.position) {
+      candles = await fetchKlineFromMeteora(symbol, fromTs, toTs);
+    }
+
+    // Fall back to GMGN
+    if (!candles || candles.length === 0) {
+      candles = await fetchKlineAll(mint, fromTs, toTs);
+    }
+
+    // Scale all candles to align with position entry_price
+    if (req.query.position && candles.length > 0) {
       const paperMod = await import("../paper-positions.js");
       const allPaper = paperMod.listPaperPositions();
       const pos = allPaper.find(p => p.id === req.query.position || p.position === req.query.position);
-      if (pos && pos.opened_at) {
-        fromTs = Math.floor((new Date(pos.opened_at).getTime() - 3600000) / 1000);
+      if (pos && pos.entry_price) {
+        const firstClose = parseFloat(candles[0].close || candles[0].c || candles[0].close);
+        if (firstClose > 0) {
+          const scaleFactor = pos.entry_price / firstClose;
+          candles = candles.map(c => {
+            const keys = ['open', 'high', 'low', 'close', 'o', 'h', 'l', 'c'];
+            const res = { ...c };
+            for (const k of keys) {
+              if (res[k] !== undefined) {
+                res[k] = String(parseFloat(res[k]) * scaleFactor);
+              }
+            }
+            return res;
+          });
+        }
       }
     }
-    if (req.query.from) fromTs = parseInt(req.query.from, 10);
-    const toTs = req.query.to ? parseInt(req.query.to, 10) : Math.floor(Date.now() / 1000);
 
-    const candles = await fetchKlineAll(mint, fromTs, toTs);
     res.json({ symbol, mint, from: fromTs, to: toTs, candles: candles });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -83,22 +193,38 @@ app.get("/api/positions", async (req, res) => {
     ]);
 
     const allPaper = paperMod.listPaperPositions();
-    const tracked = stateMod.getTrackedPositions();
+    const trackedArray = stateMod.getTrackedPositions();
+    const tracked = Object.fromEntries(trackedArray.map(t => [t.position, t]));
     const wallet = virtualMod.getVirtualWalletBalances();
 
-    const open = allPaper
-      .filter((p) => p.status === "open")
-      .map((p) => enrich(p, tracked, "open"));
+    const open = await Promise.all(
+      allPaper
+        .filter((p) => p.status === "open")
+        .map((p) => enrich(p, tracked, "open"))
+    );
 
-    const closed = allPaper
-      .filter((p) => p.status === "closed")
-      .map((p) => enrich(p, tracked, "closed"));
+    const closed = await Promise.all(
+      allPaper
+        .filter((p) => p.status === "closed")
+        .map((p) => enrich(p, tracked, "closed"))
+    );
 
-    const totalPnl = closed.reduce((s, p) => s + (p.net_pnl || 0), 0);
-    const totalFees = closed.reduce((s, p) => s + (p.fees_earned || 0), 0);
-    const totalDeployed = open.reduce((s, p) => s + (p.deposit || 0), 0);
-    const winCount = closed.filter((p) => (p.net_pnl || 0) > 0).length;
-    const lossCount = closed.filter((p) => (p.net_pnl || 0) <= 0).length;
+    const openUnrealizedPnl = open.reduce((s, p) => s + (p.net_pnl || 0), 0);
+    const totalPnl = closed.reduce((s, p) => s + (p.net_pnl || 0), 0) + openUnrealizedPnl;
+    const totalFees = closed.reduce((s, p) => s + (p.fees_earned || 0), 0) + open.reduce((s, p) => s + (p.fees_earned || 0), 0);
+    const totalDeployed = closed.reduce((s, p) => s + (p.deposit || 0), 0) + open.reduce((s, p) => s + (p.deposit || 0), 0);
+    const winCount = closed.filter((p) => (p.net_pnl ?? 0) > 0).length;
+    const lossCount = closed.filter((p) => (p.net_pnl ?? 0) < 0).length;
+    const breakEvenCount = closed.length - winCount - lossCount;
+
+    // Dynamic SOL formatting: show enough decimals for small values
+    function fmtSol(v) {
+      const a = Math.abs(v);
+      if (a < 0.0001) return 0;
+      if (a < 0.01) return +v.toFixed(4);
+      if (a < 1) return +v.toFixed(3);
+      return +v.toFixed(2);
+    }
 
     res.json({
       wallet,
@@ -106,11 +232,12 @@ app.get("/api/positions", async (req, res) => {
         open_count: open.length,
         closed_count: closed.length,
         total_deployed_sol: +totalDeployed.toFixed(2),
-        total_pnl_sol: +totalPnl.toFixed(2),
-        total_fees_sol: +totalFees.toFixed(2),
-        win_rate: closed.length > 0 ? +((winCount / closed.length) * 100).toFixed(1) : 0,
+        total_pnl_sol: fmtSol(totalPnl),
+        total_fees_sol: fmtSol(totalFees),
+        win_rate: (winCount + lossCount) > 0 ? +((winCount / (winCount + lossCount)) * 100).toFixed(1) : 0,
         wins: winCount,
         losses: lossCount,
+        break_even: breakEvenCount,
       },
       config: {
         stopLossPct: config.management?.stopLossPct ?? null,
@@ -120,7 +247,14 @@ app.get("/api/positions", async (req, res) => {
         trailingDropPct: config.management?.trailingDropPct ?? null,
         outOfRangeWaitMinutes: config.management?.outOfRangeWaitMinutes ?? null,
         strategy: config.strategy?.strategy ?? null,
+        minBinsBelow: config.strategy?.minBinsBelow ?? null,
+        maxBinsBelow: config.strategy?.maxBinsBelow ?? null,
+        minBinStep: config.screening?.minBinStep ?? null,
+        maxBinStep: config.screening?.maxBinStep ?? null,
         deployAmountSol: config.management?.deployAmountSol ?? null,
+        positionSizePct: config.management?.positionSizePct ?? null,
+        gasReserve: config.management?.gasReserve ?? null,
+        maxDeployAmount: config.risk?.maxDeployAmount ?? null,
         minFeePerTvl24h: config.management?.minFeePerTvl24h ?? null,
         virtualMode: config.virtual?.mode ?? false,
       },
@@ -148,7 +282,9 @@ function enrich(paperPos, trackedMap, status) {
     net_pnl: paperPos.net_pnl,
     pnl_pct: paperPos.deposit > 0 ? +((paperPos.net_pnl / paperPos.deposit) * 100).toFixed(2) : 0,
     fees_earned: paperPos.fees_earned || 0,
-    in_range: paperPos.in_range_pct != null ? paperPos.in_range_pct > 0 : true,
+    in_range: paperPos.last_price != null && paperPos.range?.lower != null && paperPos.range?.upper != null
+      ? paperPos.last_price >= paperPos.range.lower && paperPos.last_price <= paperPos.range.upper
+      : (t ? !t.out_of_range_since : (paperPos.in_range_pct != null ? paperPos.in_range_pct > 0 : true)),
     in_range_pct: paperPos.in_range_pct,
     minutes_out_of_range: outSince,
     range_lower: paperPos.range?.lower || null,
@@ -164,7 +300,20 @@ function enrich(paperPos, trackedMap, status) {
     peak_pnl_pct: t?.peak_pnl_pct ?? null,
     trailing_active: t?.trailing_active ?? false,
     out_of_range_since: t?.out_of_range_since || null,
+    pool_address: paperPos.pool_address || null,
+    token_mint: (paperPos.pair?.split("-")[0] && (TOKEN_MINTS[paperPos.pair.split("-")[0].toUpperCase()] || null)) || null,
     chart_token: paperPos.pair?.split("-")[0] || null,
+    close_reason: (() => {
+      const r = paperPos.close_reason;
+      if (r) return r;
+      const note = t?.notes?.[t.notes.length - 1];
+      if (note) {
+        // Strip "Closed at <timestamp>: " prefix if present
+        const m = note.match(/^Closed at .+: (.+)$/);
+        return m ? m[1] : note;
+      }
+      return null;
+    })(),
   };
 }
 
