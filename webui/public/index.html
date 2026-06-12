@@ -155,8 +155,7 @@
   .sl-tp-line {
     position: absolute; top: 0; width: 2px; height: 100%;
   }
-  .sl-tp-line.sl { background: var(--red); }
-  .sl-tp-line.tp { background: var(--green); }
+
 
   /* ─── closed table ─── */
   .closed-wrap { overflow-x: auto; }
@@ -572,35 +571,27 @@ function drawChart(p, i, c) {
       const totalSpan = (rUpper - rLower) || 1;
       const curPct = Math.min(Math.max(((curPrice - rLower) / totalSpan) * 100, 0), 100);
 
-      const scaledEntry = entryPrice;
-      const slPrice = scaledEntry ? scaledEntry * (1 + (c.stopLossPct || -20) / 100) : null;
-      const tpPrice = scaledEntry ? scaledEntry * (1 + (c.takeProfitPct || 10) / 100) : null;
-      const slPct = slPrice != null && totalSpan > 0 ? ((slPrice - rLower) / totalSpan) * 100 : null;
-      const tpPct = tpPrice != null && totalSpan > 0 ? ((tpPrice - rLower) / totalSpan) * 100 : null;
-
       renderRangeBar(rangeEl, {
         lower: rLower,
         upper: rUpper,
         curPrice,
         curPct,
-        slPct,
-        tpPct,
       });
     }
   });
 }
 
 function renderRangeBar(rangeEl, data) {
-  const fill = ensureRangeChild(rangeEl, '.range-fill', 'div', 'range-fill', { position: 'absolute', top: '0', height: '100%', background: 'var(--green-dim)', borderLeft: '2px solid var(--green)', borderRight: '2px solid var(--green)', borderRadius: '2px' });
+  const C_AMBER    = '#f59e0b';
+  const C_GREEN    = '#34d399';
+  const AMBER_DIM  = 'rgba(251,191,36,0.12)';
+
+  const fill = ensureRangeChild(rangeEl, '.range-fill', 'div', 'range-fill', { position: 'absolute', top: '0', height: '100%', background: AMBER_DIM, borderLeft: `2px solid ${C_AMBER}`, borderRight: `2px solid ${C_AMBER}`, borderRadius: '2px' });
   const labelL = ensureRangeChild(rangeEl, '.range-label.l', 'span', 'range-label l', { position: 'absolute', top: '50%', transform: 'translateY(-50%)', fontSize: '9px', fontFamily: "'IBM Plex Mono', monospace", color: 'var(--text2)', whiteSpace: 'nowrap' });
   const labelR = ensureRangeChild(rangeEl, '.range-label.r', 'span', 'range-label r', { position: 'absolute', top: '50%', transform: 'translateY(-50%)', fontSize: '9px', fontFamily: "'IBM Plex Mono', monospace", color: 'var(--text2)', whiteSpace: 'nowrap' });
-  const slLine = ensureRangeChild(rangeEl, '.sl-tp-line.sl', 'div', 'sl-tp-line sl', { position: 'absolute', top: '0', width: '1.5px', height: '100%', background: 'var(--red)', zIndex: '4' });
-  const slLabel = ensureRangeChild(rangeEl, '.range-label.sl', 'span', 'range-label sl', { position: 'absolute', top: '1px', fontSize: '7px', fontFamily: "'IBM Plex Mono', monospace", color: 'var(--red)', zIndex: '5', lineHeight: '12px' });
-  const tpLine = ensureRangeChild(rangeEl, '.sl-tp-line.tp', 'div', 'sl-tp-line tp', { position: 'absolute', top: '0', width: '1.5px', height: '100%', background: 'var(--green)', zIndex: '4' });
-  const tpLabel = ensureRangeChild(rangeEl, '.range-label.tp', 'span', 'range-label tp', { position: 'absolute', top: '1px', fontSize: '7px', fontFamily: "'IBM Plex Mono', monospace", color: 'var(--green)', zIndex: '5', lineHeight: '12px' });
-  const cursorLine = ensureRangeChild(rangeEl, '.cursor-line', 'div', 'cursor-line', { position: 'absolute', bottom: '0', width: '1.5px', height: '100%', background: 'var(--blue)', zIndex: '5' });
-  const cursorTri = ensureRangeChild(rangeEl, '.cursor-triangle', 'div', 'cursor-triangle', { position: 'absolute', top: '0', width: '0', height: '0', borderLeft: '3px solid transparent', borderRight: '3px solid transparent', borderTop: '5px solid var(--blue)', zIndex: '5' });
-  const cursorLabel = ensureRangeChild(rangeEl, '.cursor-price', 'span', 'cursor-price', { position: 'absolute', bottom: '0', fontSize: '7px', fontFamily: "'IBM Plex Mono', monospace", color: 'var(--blue)', zIndex: '5', lineHeight: '10px', whiteSpace: 'nowrap' });
+  const cursorLine = ensureRangeChild(rangeEl, '.cursor-line', 'div', 'cursor-line', { position: 'absolute', bottom: '0', width: '1.5px', height: '100%', background: C_GREEN, zIndex: '5' });
+  const cursorTri = ensureRangeChild(rangeEl, '.cursor-triangle', 'div', 'cursor-triangle', { position: 'absolute', top: '0', width: '0', height: '0', borderLeft: '3px solid transparent', borderRight: '3px solid transparent', borderTop: `5px solid ${C_GREEN}`, zIndex: '5' });
+  const cursorLabel = ensureRangeChild(rangeEl, '.cursor-price', 'span', 'cursor-price', { position: 'absolute', bottom: '0', fontSize: '7px', fontFamily: "'IBM Plex Mono', monospace", color: C_GREEN, zIndex: '5', lineHeight: '10px', whiteSpace: 'nowrap' });
 
   fill.style.left = '0%';
   fill.style.width = '100%';
@@ -608,26 +599,6 @@ function renderRangeBar(rangeEl, data) {
   labelL.textContent = data.lower.toExponential(2);
   labelR.style.right = '4px';
   labelR.textContent = data.upper.toExponential(2);
-
-  const slVisible = data.slPct != null && data.slPct >= 0 && data.slPct <= 100;
-  slLine.style.display = slVisible ? 'block' : 'none';
-  slLabel.style.display = slVisible ? 'block' : 'none';
-  if (slVisible) {
-    slLine.style.left = `${data.slPct}%`;
-    slLabel.style.left = `${data.slPct}%`;
-    slLabel.style.transform = 'translateX(calc(-100% - 2px))';
-    slLabel.textContent = 'SL';
-  }
-
-  const tpVisible = data.tpPct != null && data.tpPct >= 0 && data.tpPct <= 100;
-  tpLine.style.display = tpVisible ? 'block' : 'none';
-  tpLabel.style.display = tpVisible ? 'block' : 'none';
-  if (tpVisible) {
-    tpLine.style.left = `${data.tpPct}%`;
-    tpLabel.style.left = `${data.tpPct}%`;
-    tpLabel.style.transform = 'translateX(calc(-100% - 2px))';
-    tpLabel.textContent = 'TP';
-  }
 
   cursorLine.style.left = `${data.curPct}%`;
   cursorTri.style.left = `${data.curPct}%`;
