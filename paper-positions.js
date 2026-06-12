@@ -147,7 +147,7 @@ function computeInitialSplit(depositUsd, entryPrice, lowerPrice, upperPrice) {
  */
 function processCandle(candle, position) {
   const { low, high, close, volume } = candle;
-  const { lowerPrice, upperPrice, lpFeeFraction, avgExistingBinTvl, weights, lowerBinId, upperBinId, depositAmount, initialXUsd, initialYUsd, entryPrice } = position;
+  const { lowerPrice, upperPrice, lpFeeFraction, avgExistingBinTvl, weights, lowerBinId, upperBinId, depositAmount, initialXUsd, initialYUsd, entryPrice, tokenYPrice } = position;
 
   // ── Fee accrual ──
   // How much of the candle's price range overlaps our position range?
@@ -157,16 +157,21 @@ function processCandle(candle, position) {
   const overlapHigh = Math.min(candleHigh, upperPrice);
 
   let feeEarned = 0;
-  if (overlapHigh > overlapLow) {
-    const overlapFrac     = (overlapHigh - overlapLow) / Math.max(candleHigh - candleLow, 1e-12);
-    const volumeInRange   = volume * overlapFrac;
+  if (overlapHigh >= overlapLow) {
+    const overlapFrac = (overlapHigh - overlapLow) / Math.max(candleHigh - candleLow, 1e-12);
 
-    // Avg TVL share across our bins (simple avg — weights already encode shape)
-    const ourAvgBinDeposit  = depositAmount / weights.length;
-    const totalAvgBinLiq    = avgExistingBinTvl + ourAvgBinDeposit;
-    const avgTvlShare       = ourAvgBinDeposit / totalAvgBinLiq;
+    // Volume from Meteora OHLCV is in USD, convert to SOL.
+    // avgExistingBinTvl is in USD (from d.tvl), convert to SOL using tokenYPrice.
+    // ourAvgBinDeposit is depositAmount / bins (in SOL).
+    const solPrice           = tokenYPrice > 0 ? tokenYPrice : 1;
+    const volumeValueSol     = solPrice > 0 ? volume / solPrice : 0;
+    const volumeInRangeSol   = volumeValueSol * overlapFrac;
+    const existingBinTvlSol  = avgExistingBinTvl / solPrice;
+    const ourAvgBinDeposit   = depositAmount / weights.length;
+    const totalAvgBinLiq     = existingBinTvlSol + ourAvgBinDeposit;
+    const avgTvlShare        = ourAvgBinDeposit / totalAvgBinLiq;
 
-    feeEarned = volumeInRange * lpFeeFraction * avgTvlShare;
+    feeEarned = volumeInRangeSol * lpFeeFraction * avgTvlShare;
   }
 
   // ── IL ──
@@ -197,7 +202,7 @@ export async function openPaperPosition({
   const { getBinIdFromPrice } = await getDLMMHelpers();
   const poolCfg = await fetchPoolConfig(pool_address);
 
-  const { binStep, baseFeePct, protocolFeePct, tvl, name, tokenXSymbol, tokenYSymbol, currentPrice } = poolCfg;
+  const { binStep, baseFeePct, protocolFeePct, tvl, name, tokenXSymbol, tokenYSymbol, tokenYPrice, currentPrice } = poolCfg;
   const lpFeeFraction = (baseFeePct / 100) * (1 - protocolFeePct / 100);
 
   const lowerBinId  = getBinIdFromPrice(lower_price, binStep, true);
@@ -240,6 +245,7 @@ export async function openPaperPosition({
     upper_bin_id:     upperBinId,
     weights,
     avg_existing_bin_tvl: avgExistingBinTvl,
+    token_y_price:        tokenYPrice,
 
     // entry state (prices in OHLCV/datapi scale)
     entry_price:       normEntryPrice,
@@ -302,10 +308,11 @@ export async function tickPaperPositions() {
           initialXUsd:        pos.initial_x_usd,
           initialYUsd:        pos.initial_y_usd,
           entryPrice:         pos.entry_price,
+          tokenYPrice:        pos.token_y_price,
         });
 
         fees_earned     += feeEarned;
-        il_usd           = ilUsd;          // IL is absolute (not cumulative)
+        il_usd           = ilUsd;
         candles_total   += 1;
         if (inRange) candles_in_range += 1;
 
@@ -313,9 +320,9 @@ export async function tickPaperPositions() {
         pos.last_candle_timestamp = candle.timestamp;
       }
 
-      pos.fees_earned      = +fees_earned.toFixed(4);
-      pos.il_usd           = +il_usd.toFixed(4);
-      pos.net_pnl          = +(fees_earned + il_usd).toFixed(4);
+      pos.fees_earned      = fees_earned;
+      pos.il_usd           = il_usd;
+      pos.net_pnl          = fees_earned + il_usd;
       pos.candles_total    = candles_total;
       pos.candles_in_range = candles_in_range;
 
@@ -350,7 +357,7 @@ export function listPaperPositions() {
 /**
  * Close a paper position. Returns final summary.
  */
-export function closePaperPosition(id) {
+export function closePaperPosition(id, reason = null) {
   const state = load();
   const pos   = state.positions[id];
   if (!pos) throw new Error(`Paper position ${id} not found`);
@@ -358,10 +365,11 @@ export function closePaperPosition(id) {
 
   pos.status    = "closed";
   pos.closed_at = new Date().toISOString();
+  pos.close_reason = reason;
   state.positions[id] = pos;
   save(state);
 
-  log("paper_sim", `Closed paper position ${id}: netPnL=◎${pos.net_pnl} fees=◎${pos.fees_earned} IL=◎${pos.il_usd}`);
+  log("paper_sim", `Closed paper position ${id}: netPnL=◎${pos.net_pnl} fees=◎${pos.fees_earned} IL=◎${pos.il_usd} reason="${reason}"`);
   return formatSummary(pos);
 }
 
@@ -381,6 +389,7 @@ function formatSummary(pos) {
   return {
     id:            pos.id,
     pool:          pos.pool_name,
+    pool_address:  pos.pool_address,
     pair:          pos.pair,
     status:        pos.status,
     strategy:      pos.strategy_type,
@@ -397,5 +406,6 @@ function formatSummary(pos) {
     in_range_pct:  inRangePct,
     candles_total: pos.candles_total,
     annualized_fee_apr: annualizedApr,
+    close_reason:  pos.close_reason ?? null,
   };
 }

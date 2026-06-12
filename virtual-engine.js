@@ -48,10 +48,11 @@ function saveState(state) {
 }
 
 function createDefaultState() {
+  const initialSol = config?.virtual?.initialSol ?? 100;
   return {
     wallet: {
-      sol: 100,
-      initial_sol: 100,
+      sol: initialSol,
+      initial_sol: initialSol,
     },
     stats: {
       total_deploys: 0,
@@ -236,7 +237,7 @@ export async function virtualDeployPosition(args) {
  * @param {string} positionId — paper position ID (e.g. "paper-abc123")
  * @returns {object} close result with PnL
  */
-export function virtualClosePosition(positionId) {
+export function virtualClosePosition(positionId, reason = null) {
   try {
     // Get position before closing to know deposit + net PnL
     const pos = getPaperPosition(positionId);
@@ -245,7 +246,7 @@ export function virtualClosePosition(positionId) {
     }
 
     // Close the paper position
-    const result = closePaperPosition(positionId);
+    const result = closePaperPosition(positionId, reason);
 
     // Calculate proceeds: deposit + net pnl
     const netPnl = result.net_pnl ?? 0;
@@ -431,7 +432,8 @@ export function getVirtualStatus() {
     lines.push("");
     lines.push("Open positions:");
     open.forEach((p) => {
-      lines.push(`  ${p.id}: ${p.pair} | deposit ◎${p.deposit} | PnL ◎${p.net_pnl?.toFixed(2) ?? 0} | fees ◎${p.fees_earned?.toFixed(4) ?? 0}`);
+      const fmtV = (v) => { const n = Number(v) || 0; return Math.abs(n) < 0.0001 && n !== 0 ? n.toExponential(2) : n.toFixed(4); };
+      lines.push(`  ${p.id}: ${p.pair} | deposit ◎${p.deposit} | PnL ◎${p.net_pnl?.toFixed(2) ?? 0} | fees ◎${fmtV(p.fees_earned)}`);
     });
   }
 

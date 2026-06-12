@@ -643,8 +643,8 @@ export async function executeTool(name, args) {
     if (name === "close_position") {
       const posId = args?.position_address;
       if (posId && posId.startsWith("paper-")) {
-        log("virtual", `Intercepted close_position for virtual mode: ${posId}`);
-        return virtualClosePosition(posId);
+        log("virtual", `Intercepted close_position for virtual mode: ${posId} reason=${args?.reason || 'none'}`);
+        return virtualClosePosition(posId, args?.reason || null);
       }
     }
     if (name === "claim_fees") {

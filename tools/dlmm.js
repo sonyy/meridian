@@ -947,7 +947,6 @@ export async function getPositionPnl({ pool_address, position_address }) {
   pool_address = normalizeMint(pool_address);
   position_address = normalizeMint(position_address);
   const walletAddress = getWallet().publicKey.toString();
-  // Prefer the public-infra path (RPC + Jupiter + Meteora deposits) used by getMyPositions.
   if (config.pnl.source === "rpc") {
     try {
       const payload = await getMyPositions({ force: true, silent: true });
@@ -1159,9 +1158,6 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
   }
 
   const loadPositions = async () => { try {
-    // ── Primary path: public infra (on-chain RPC + Jupiter + Meteora deposits) ──
-    // No LPAgent / agentmeridian dependency, so the poller runs aggressively on
-    // fully public resources. Falls through to the Meteora-API path on any error.
     if (config.pnl.source === "rpc") {
       try {
         if (!silent) log("positions", `Computing PnL from RPC (${config.pnl.rpcUrl})...`);
@@ -1177,7 +1173,7 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
       }
     }
 
-    // ── Fallback path: Meteora portfolio + /pnl APIs (no LPAgent) ──
+    // Fallback path: Meteora portfolio + /pnl APIs (no LPAgent)
     if (!silent) log("positions", "Fetching portfolio via Meteora portfolio API...");
     const portfolioUrl = `https://dlmm.datapi.meteora.ag/portfolio/open?user=${walletAddress}`;
     const res = await fetch(portfolioUrl);
@@ -1192,7 +1188,7 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
     const binDataByPool = {};
     const pnlMaps = await Promise.all(pools.map(pool => fetchDlmmPnlForPool(pool.poolAddress, walletAddress)));
     pools.forEach((pool, i) => { binDataByPool[pool.poolAddress] = pnlMaps[i]; });
-    const lpAgentByPosition = {}; // LPAgent removed — Meteora binData only
+    const lpAgentByPosition = await fetchLpAgentOpenPositions(walletAddress);
 
     const positions = [];
     for (const pool of pools) {
@@ -1328,7 +1324,6 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
       wallet: walletAddress,
       total_positions: positions.length,
       positions,
-      source: "meteora",
     };
     if (useLocalWallet) {
       syncOpenPositions(positions.map(p => p.position));

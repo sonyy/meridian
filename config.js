@@ -170,6 +170,7 @@ export const config = {
         requireBbPosition:        r.requireBbPosition        ?? null,
       };
     })(),
+    feeSource: gmgnValue("feeSource", "gmgnFeeSource", "gmgn"),
   },
 
   // ─── Position Management ────────────────
@@ -269,25 +270,12 @@ export const config = {
     lpAgentRelayEnabled: u.lpAgentRelayEnabled ?? false,
   },
 
-  // ─── PnL fetcher / poller (public infra: RPC + Meteora deposits + Jupiter) ──
+  // ─── PnL Fetcher / Poller (public infra: RPC + Meteora deposits + Jupiter) ──
   pnl: {
-    // Live position value comes from on-chain reads on this RPC.
-    // Defaults to the public pump.helius endpoint so the aggressive poller
-    // never burns the main RPC_URL or the LPAgent sponsor budget.
     rpcUrl: nonEmptyString(u.pnlRpcUrl, process.env.PNL_RPC_URL, "https://pump.helius-rpc.com"),
-    source: nonEmptyString(u.pnlSource, "rpc"), // rpc | meteora (fallback-only)
+    source: nonEmptyString(u.pnlSource, "rpc"),
     pollIntervalSec: Number(u.pnlPollIntervalSec ?? 3),
     depositCacheTtlSec: Number(u.pnlDepositCacheTtlSec ?? 300),
-  },
-
-  // ─── GMGN (fee source for minTokenFeesSol gate) ──────────────
-  gmgn: {
-    apiKey: nonEmptyString(gmgnUserConfig.apiKey, u.gmgnApiKey, process.env.GMGN_API_KEY),
-    baseUrl: nonEmptyString(gmgnUserConfig.baseUrl, u.gmgnBaseUrl, "https://openapi.gmgn.ai"),
-    requestDelayMs: Number(gmgnUserConfig.requestDelayMs ?? u.gmgnRequestDelayMs ?? 2500),
-    maxRetries: Number(gmgnUserConfig.maxRetries ?? u.gmgnMaxRetries ?? 2),
-    // gmgn = use GMGN total_fee for global_fees_sol; jupiter = legacy Jupiter fees
-    feeSource: nonEmptyString(gmgnUserConfig.feeSource, u.gmgnFeeSource, "gmgn"),
   },
 
   jupiter: {
