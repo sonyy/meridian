@@ -244,6 +244,18 @@ function fmtSol(v) {
   if (Math.abs(v) >= 1e-9) return v.toExponential(2);
   return '0';
 }
+function fmtExitReason(p) {
+  const r = (p.close_reason || '').toLowerCase();
+  if (!r) return '-';
+  // Already has direction
+  if (r.includes('above') || r.includes('below')) return p.close_reason;
+  // Detect OOR and differentiate
+  if (r.includes('oor') || r.includes('out of range')) {
+    if (p.last_price != null && p.range_upper != null && p.last_price > p.range_upper) return 'OOR above ↑';
+    if (p.last_price != null && p.range_lower != null && p.last_price < p.range_lower) return 'OOR below ↓';
+  }
+  return p.close_reason;
+}
 let charts = new Map();  // positionId → Chart instance
 
 // Plugin: draw colored price markers on Y-axis
@@ -401,7 +413,7 @@ function render(d) {
               <td>${fmtSol(p.fees_earned)} SOL</td>
               <td style="color:${(p.il_usd||0) < 0 ? 'var(--red)' : 'var(--text2)'}">${fmtSol(p.il_usd)}</td>
               <td>${p.duration_hours?.toFixed(1) || '-'}h</td>
-              <td style="color:var(--text2);font-size:11px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(p.close_reason||'').replace(/"/g,'&quot;')}">${p.close_reason || '-'}</td>
+              <td style="color:var(--text2);font-size:11px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(p.close_reason||'').replace(/"/g,'&quot;')}">${fmtExitReason(p)}</td>
               <td style="font-size:11px">${p.opened_at ? new Date(p.opened_at).toLocaleString() : '-'}</td>
               <td style="font-size:11px">${p.closed_at ? new Date(p.closed_at).toLocaleString() : '-'}</td>
             </tr>
