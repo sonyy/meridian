@@ -568,14 +568,24 @@ function drawChart(p, i, c) {
       const curPrice = prices.length > 1 ? prices[prices.length - 1] : price;
       const rLower = lower;
       const rUpper = upper;
-      const totalSpan = (rUpper - rLower) || 1;
-      const curPct = Math.min(Math.max(((curPrice - rLower) / totalSpan) * 100, 0), 100);
+      const span = (rUpper - rLower) || 1;
+      // Zoom out 40% each side so OOR cursor stays visible
+      const zoomOut = 0.4;
+      const barLower = rLower - span * zoomOut;
+      const barUpper = rUpper + span * zoomOut;
+      const barSpan = barUpper - barLower || 1;
+      const curPct = Math.min(Math.max(((curPrice - barLower) / barSpan) * 100, 2), 98);
+
+      const fillLeft  = ((rLower - barLower) / barSpan) * 100;
+      const fillWidth = ((rUpper - rLower) / barSpan) * 100;
 
       renderRangeBar(rangeEl, {
         lower: rLower,
         upper: rUpper,
         curPrice,
         curPct,
+        fillLeft,
+        fillWidth,
       });
     }
   });
@@ -593,11 +603,14 @@ function renderRangeBar(rangeEl, data) {
   const cursorTri = ensureRangeChild(rangeEl, '.cursor-triangle', 'div', 'cursor-triangle', { position: 'absolute', top: '0', width: '0', height: '0', borderLeft: '3px solid transparent', borderRight: '3px solid transparent', borderTop: `5px solid ${C_GREEN}`, zIndex: '5' });
   const cursorLabel = ensureRangeChild(rangeEl, '.cursor-price', 'span', 'cursor-price', { position: 'absolute', bottom: '0', fontSize: '7px', fontFamily: "'IBM Plex Mono', monospace", color: C_GREEN, zIndex: '5', lineHeight: '10px', whiteSpace: 'nowrap' });
 
-  fill.style.left = '0%';
-  fill.style.width = '100%';
-  labelL.style.left = '4px';
+  fill.style.left = `${data.fillLeft}%`;
+  fill.style.width = `${data.fillWidth}%`;
+  labelL.style.left = `${data.fillLeft}%`;
+  labelL.style.transform = 'translateX(calc(-100% - 3px))';
   labelL.textContent = data.lower.toExponential(2);
-  labelR.style.right = '4px';
+  labelR.style.right = 'auto';
+  labelR.style.left = `${data.fillLeft + data.fillWidth}%`;
+  labelR.style.transform = 'translateX(3px)';
   labelR.textContent = data.upper.toExponential(2);
 
   cursorLine.style.left = `${data.curPct}%`;
