@@ -152,8 +152,40 @@
   .range-label.l { left: 4px; }
   .range-label.r { right: 4px; }
 
-  .sl-tp-line {
-    position: absolute; top: 0; width: 2px; height: 100%;
+  /* ─── pnl bar ─── */
+  .pnl-bar-wrap {
+    position: relative; height: 22px; margin-top: 4px; border-radius: 4px; overflow: visible;
+  }
+  .pnl-bar-bg {
+    position: absolute; top: 50%; left: 0; right: 0; height: 6px;
+    transform: translateY(-50%); border-radius: 3px;
+    background: linear-gradient(to right, rgba(251,113,133,0.25), rgba(251,191,36,0.25), rgba(52,211,149,0.25));
+  }
+  .pnl-sl-line, .pnl-tp-line {
+    position: absolute; top: 1px; width: 1.5px; height: calc(100% - 2px);
+    border-radius: 0;
+  }
+  .pnl-sl-line { background: var(--red); }
+  .pnl-tp-line { background: var(--green); }
+  .pnl-sl-label, .pnl-tp-label {
+    position: absolute; top: 1px;
+    font-size: 7px; font-family: 'IBM Plex Mono', monospace; white-space: nowrap; z-index: 2;
+  }
+  .pnl-sl-label { color: var(--red); }
+  .pnl-tp-label { color: var(--green); }
+  .pnl-cursor {
+    position: absolute; bottom: 0; width: 2px; height: 100%;
+    z-index: 3; pointer-events: none;
+  }
+  .pnl-tri {
+    position: absolute; top: 0; width: 0; height: 0;
+    border-left: 4px solid transparent; border-right: 4px solid transparent;
+    border-top: 6px solid #888b98; z-index: 3;
+  }
+  .pnl-cursor-label {
+    position: absolute; bottom: 0;
+    font-size: 7px; font-family: 'IBM Plex Mono', monospace; white-space: nowrap;
+    z-index: 3; line-height: 9px;
   }
 
 
@@ -408,10 +440,12 @@ function renderCard(p, c) {
           <span class="m-label">age</span><span class="m-value">${dur}</span>
           <span class="m-label">trailing</span><span class="m-value">${p.trailing_active ? `🟢 peak ${(p.peak_pnl_pct||0).toFixed(1)}%` : '−'}</span>
           <span class="m-label">candles</span><span class="m-value">${p.candles_total || 0}</span>
+          <span class="m-label">SL / TP</span><span class="m-value"><span style="color:var(--red)">${c.stopLossPct}%</span> / <span style="color:var(--green)">+${c.takeProfitPct}%</span></span>
         </div>
         <div style="margin-top:8px">
           <div class="chart-wrap"></div>
           <div class="range-bar-wrap"></div>
+          <div class="pnl-bar-wrap"></div>
         </div>
       </div>
     </div>
@@ -588,6 +622,25 @@ function drawChart(p, i, c) {
         fillWidth,
       });
     }
+
+    // PnL bar (SL/TP vs net PnL)
+    const pnlBar = card.querySelector('.pnl-bar-wrap');
+    if (pnlBar) {
+      const slPct = c.stopLossPct;
+      const tpPct = c.takeProfitPct;
+      const netPnlPct = p.pnl_pct || 0;
+      const pnlSpan = tpPct - slPct;
+      // Zoom out 30% each side so OOR cursor stays visible
+      const zoom = 0.3;
+      const barLo = slPct - pnlSpan * zoom;
+      const barHi = tpPct + pnlSpan * zoom;
+      const barSpan = barHi - barLo || 1;
+      const curX    = Math.min(Math.max(((netPnlPct - barLo) / barSpan) * 100, 2), 98);
+      const slX     = ((slPct - barLo) / barSpan) * 100;
+      const tpX     = ((tpPct - barLo) / barSpan) * 100;
+
+      renderPnlBar(pnlBar, { slPct, tpPct, netPnlPct, curX, slX, tpX });
+    }
   });
 }
 
@@ -619,6 +672,57 @@ function renderRangeBar(rangeEl, data) {
   cursorLabel.style.left = `${data.curPct}%`;
   cursorLabel.style.transform = 'translateX(2px)';
   cursorLabel.textContent = data.curPrice.toExponential(3);
+}
+
+function renderPnlBar(el, d) {
+  const triColor = d.netPnlPct >= 0 ? '#34d399' : '#fb7185';
+
+  // Background gradient
+  let bg = el.querySelector('.pnl-bar-bg');
+  if (!bg) { bg = document.createElement('div'); bg.className = 'pnl-bar-bg'; el.appendChild(bg); }
+
+  // SL line + label
+  let sl = el.querySelector('.pnl-sl-line');
+  if (!sl) { sl = document.createElement('div'); sl.className = 'pnl-sl-line'; el.appendChild(sl); }
+  sl.style.left = `${d.slX}%`;
+
+  let slLbl = el.querySelector('.pnl-sl-label');
+  if (!slLbl) { slLbl = document.createElement('div'); slLbl.className = 'pnl-sl-label'; el.appendChild(slLbl); }
+  slLbl.style.left = `${d.slX}%`;
+  slLbl.style.transform = 'translateX(-100%)';
+  slLbl.textContent = `${d.slPct >= 0 ? '+' : ''}${d.slPct}%`;
+
+  // TP line + label
+  let tp = el.querySelector('.pnl-tp-line');
+  if (!tp) { tp = document.createElement('div'); tp.className = 'pnl-tp-line'; el.appendChild(tp); }
+  tp.style.left = `${d.tpX}%`;
+
+  let tpLbl = el.querySelector('.pnl-tp-label');
+  if (!tpLbl) { tpLbl = document.createElement('div'); tpLbl.className = 'pnl-tp-label'; el.appendChild(tpLbl); }
+  tpLbl.style.left = `${d.tpX}%`;
+  tpLbl.style.transform = 'translateX(3px)';
+  tpLbl.textContent = `+${d.tpPct}%`;
+
+  // Cursor triangle
+  let tri = el.querySelector('.pnl-tri');
+  if (!tri) { tri = document.createElement('div'); tri.className = 'pnl-tri'; el.appendChild(tri); }
+  tri.style.left = `${d.curX}%`;
+  tri.style.transform = 'translateX(-50%)';
+  tri.style.borderTopColor = triColor;
+
+  // Cursor vertical line
+  let cur = el.querySelector('.pnl-cursor');
+  if (!cur) { cur = document.createElement('div'); cur.className = 'pnl-cursor'; el.appendChild(cur); }
+  cur.style.left = `${d.curX}%`;
+  cur.style.background = triColor;
+
+  // Cursor label
+  let curLbl = el.querySelector('.pnl-cursor-label');
+  if (!curLbl) { curLbl = document.createElement('div'); curLbl.className = 'pnl-cursor-label'; el.appendChild(curLbl); }
+  curLbl.style.left = `${d.curX}%`;
+  curLbl.style.transform = 'translateX(-50%)';
+  curLbl.style.color = triColor;
+  curLbl.textContent = `${d.netPnlPct >= 0 ? '+' : ''}${d.netPnlPct.toFixed(2)}%`;
 }
 
 function ensureRangeChild(parent, selector, tag, className, style) {
