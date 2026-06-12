@@ -433,7 +433,7 @@ function renderCard(p, c) {
         <div class="meta-grid">
           <span class="m-label">strategy</span><span class="m-value">${p.strategy || '-'}</span>
           <span class="m-label">deposit</span><span class="m-value">${(p.deposit||0).toFixed(2)} SOL</span>
-          <span class="m-label">net PnL</span><span class="m-value ${pnlClass}">${(p.net_pnl||0) >= 0 ? '+' : ''}${(p.net_pnl||0).toFixed(4)} SOL</span>
+          <span class="m-label">net PnL</span><span class="m-value ${pnlClass}">${(p.net_pnl||0) >= 0 ? '+' : ''}${(p.net_pnl||0).toFixed(4)} SOL (${(p.pnl_pct||0) >= 0 ? '+' : ''}${(p.pnl_pct||0).toFixed(2)}%)</span>
           <span class="m-label">fees earned</span><span class="m-value">${fmtSol(p.fees_earned)} SOL</span>
           <span class="m-label">fee APR</span><span class="m-value">${p.annualized_fee_apr != null ? p.annualized_fee_apr.toFixed(1) + '%' : '-'}</span>
           <span class="m-label">IL</span><span class="m-value">${fmtSol(p.il_usd)} SOL</span>
@@ -540,8 +540,7 @@ function drawChart(p, i, c) {
 
     const markerPrices = [
       { price: upper, label: upper.toExponential(3), color: '#f59e0b' },
-      { price: entryPrice, label: entryPrice.toExponential(3), color: 'rgba(96,165,250,0.7)' },
-      { price: prices.length > 1 ? prices[prices.length - 1] : price, label: (prices.length > 1 ? prices[prices.length - 1] : price).toExponential(3), color: '#34d399' },
+      { price: prices.length > 1 ? prices[prices.length - 1] : price, label: (prices.length > 1 ? prices[prices.length - 1] : price).toExponential(3), color: '#60a5fa' },
       { price: lower, label: lower.toExponential(3), color: '#f59e0b' },
     ];
 
@@ -554,7 +553,6 @@ function drawChart(p, i, c) {
       ch.data.datasets[1].data = prices;
       ch.data.datasets[2].data = prices.map(() => lower);
       ch.data.datasets[3].data = prices.map(() => upper);
-      ch.data.datasets[4].data = prices.map(() => entryPrice);
       ch.options.scales.y.min = yMin;
       ch.options.scales.y.max = yMax;
       ch.options._markerPrices = markerPrices;
@@ -568,10 +566,9 @@ function drawChart(p, i, c) {
           labels,
           datasets: [
             { data: prices.map(() => lower), borderWidth: 0, pointRadius: 0, fill: 3, backgroundColor: 'rgba(251,191,36,0.12)' },
-            { data: prices, borderColor: '#34d399', borderWidth: 1.5, pointRadius: 0, pointHitRadius: 3, fill: false, tension: 0.1 },
+            { data: prices, borderColor: '#60a5fa', borderWidth: 1.5, pointRadius: 0, pointHitRadius: 3, fill: false, tension: 0.1 },
             { data: prices.map(() => lower), borderColor: '#f59e0b', borderWidth: 2, pointRadius: 0, fill: false },
             { data: prices.map(() => upper), borderColor: '#f59e0b', borderWidth: 2, pointRadius: 0, fill: false },
-            { data: prices.map(() => entryPrice), borderColor: 'rgba(96,165,250,0.5)', borderWidth: 1.5, borderDash: [3, 3], pointRadius: 0, fill: false },
           ],
         },
         options: {
@@ -646,15 +643,15 @@ function drawChart(p, i, c) {
 
 function renderRangeBar(rangeEl, data) {
   const C_AMBER    = '#f59e0b';
-  const C_GREEN    = '#34d399';
+  const C_BLUE     = '#60a5fa';
   const AMBER_DIM  = 'rgba(251,191,36,0.12)';
 
   const fill = ensureRangeChild(rangeEl, '.range-fill', 'div', 'range-fill', { position: 'absolute', top: '0', height: '100%', background: AMBER_DIM, borderLeft: `2px solid ${C_AMBER}`, borderRight: `2px solid ${C_AMBER}`, borderRadius: '2px' });
   const labelL = ensureRangeChild(rangeEl, '.range-label.l', 'span', 'range-label l', { position: 'absolute', top: '50%', transform: 'translateY(-50%)', fontSize: '9px', fontFamily: "'IBM Plex Mono', monospace", color: 'var(--text2)', whiteSpace: 'nowrap' });
   const labelR = ensureRangeChild(rangeEl, '.range-label.r', 'span', 'range-label r', { position: 'absolute', top: '50%', transform: 'translateY(-50%)', fontSize: '9px', fontFamily: "'IBM Plex Mono', monospace", color: 'var(--text2)', whiteSpace: 'nowrap' });
-  const cursorLine = ensureRangeChild(rangeEl, '.cursor-line', 'div', 'cursor-line', { position: 'absolute', bottom: '0', width: '1.5px', height: '100%', background: C_GREEN, zIndex: '5' });
-  const cursorTri = ensureRangeChild(rangeEl, '.cursor-triangle', 'div', 'cursor-triangle', { position: 'absolute', top: '0', width: '0', height: '0', borderLeft: '3px solid transparent', borderRight: '3px solid transparent', borderTop: `5px solid ${C_GREEN}`, zIndex: '5' });
-  const cursorLabel = ensureRangeChild(rangeEl, '.cursor-price', 'span', 'cursor-price', { position: 'absolute', bottom: '0', fontSize: '7px', fontFamily: "'IBM Plex Mono', monospace", color: C_GREEN, zIndex: '5', lineHeight: '10px', whiteSpace: 'nowrap' });
+  const cursorLine = ensureRangeChild(rangeEl, '.cursor-line', 'div', 'cursor-line', { position: 'absolute', bottom: '0', width: '1.5px', height: '100%', background: C_BLUE, zIndex: '5' });
+  const cursorTri = ensureRangeChild(rangeEl, '.cursor-triangle', 'div', 'cursor-triangle', { position: 'absolute', top: '0', width: '0', height: '0', borderLeft: '3px solid transparent', borderRight: '3px solid transparent', borderTop: `5px solid ${C_BLUE}`, zIndex: '5' });
+  const cursorLabel = ensureRangeChild(rangeEl, '.cursor-price', 'span', 'cursor-price', { position: 'absolute', bottom: '0', fontSize: '7px', fontFamily: "'IBM Plex Mono', monospace", color: C_BLUE, zIndex: '5', lineHeight: '10px', whiteSpace: 'nowrap' });
 
   fill.style.left = `${data.fillLeft}%`;
   fill.style.width = `${data.fillWidth}%`;
@@ -675,7 +672,7 @@ function renderRangeBar(rangeEl, data) {
 }
 
 function renderPnlBar(el, d) {
-  const triColor = d.netPnlPct >= 0 ? '#34d399' : '#fb7185';
+  const C_BLUE = '#60a5fa';
 
   // Background gradient
   let bg = el.querySelector('.pnl-bar-bg');
@@ -708,20 +705,20 @@ function renderPnlBar(el, d) {
   if (!tri) { tri = document.createElement('div'); tri.className = 'pnl-tri'; el.appendChild(tri); }
   tri.style.left = `${d.curX}%`;
   tri.style.transform = 'translateX(-50%)';
-  tri.style.borderTopColor = triColor;
+  tri.style.borderTopColor = C_BLUE;
 
   // Cursor vertical line
   let cur = el.querySelector('.pnl-cursor');
   if (!cur) { cur = document.createElement('div'); cur.className = 'pnl-cursor'; el.appendChild(cur); }
   cur.style.left = `${d.curX}%`;
-  cur.style.background = triColor;
+  cur.style.background = C_BLUE;
 
   // Cursor label
   let curLbl = el.querySelector('.pnl-cursor-label');
   if (!curLbl) { curLbl = document.createElement('div'); curLbl.className = 'pnl-cursor-label'; el.appendChild(curLbl); }
   curLbl.style.left = `${d.curX}%`;
   curLbl.style.transform = 'translateX(-50%)';
-  curLbl.style.color = triColor;
+  curLbl.style.color = C_BLUE;
   curLbl.textContent = `${d.netPnlPct >= 0 ? '+' : ''}${d.netPnlPct.toFixed(2)}%`;
 }
 
