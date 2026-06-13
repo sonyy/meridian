@@ -1708,7 +1708,7 @@ export async function closePosition({ position_address, reason }) {
           tracked,
         });
 
-        let exitMarket = {};
+        exitMarket = {};
         try {
           const { default: fetch } = await import("node-fetch").catch(() => ({ default: globalThis.fetch }));
           const exitDetail = await fetch(`https://pool-discovery-api.datapi.meteora.ag/pools?page_size=1&filter_by=${encodeURIComponent(`pool_address=${poolAddress}`)}&timeframe=${encodeURIComponent(config.screening?.timeframe || "5m")}`).then(r => r.json()).catch(() => null);

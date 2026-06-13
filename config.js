@@ -47,14 +47,12 @@ if (u.telegramChatId) process.env.TELEGRAM_CHAT_ID ||= String(u.telegramChatId);
 const indicatorUserConfig = u.chartIndicators ?? {};
 
 // Optional standalone GMGN config file (mirrors user-config layering)
-const GMGN_CONFIG_PATH = repoPath("gmgn-config.json");
 const gmgnUserConfig = fs.existsSync(GMGN_CONFIG_PATH)
   ? JSON.parse(fs.readFileSync(GMGN_CONFIG_PATH, "utf8"))
   : {};
 if (gmgnUserConfig.apiKey || u.gmgnApiKey) {
   process.env.GMGN_API_KEY ||= gmgnUserConfig.apiKey || u.gmgnApiKey;
 }
-if (u.telegramChatId) process.env.TELEGRAM_CHAT_ID ||= String(u.telegramChatId);
 
 function nonEmptyString(...values) {
   for (const value of values) {

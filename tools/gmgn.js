@@ -3,26 +3,6 @@ import { log } from "../logger.js";
 import { fetchChartIndicatorsForMint } from "./chart-indicators.js";
 import { gmgnFetch, paceGmgnRequest } from "./gmgn-client.js";
 
-export function hasGmgnApiKey() {
-  return !!(config.gmgn?.apiKey || process.env.GMGN_API_KEY);
-}
-
-export async function getGmgnTokenFees(mint) {
-  if (!mint || !hasGmgnApiKey()) return null;
-  try {
-    const payload = await gmgnFetch("/v1/token/info", { params: { chain: "sol", address: mint } });
-    const info = payload?.data?.data || payload?.data || payload;
-    if (!info || typeof info !== "object") return null;
-    return {
-      total_fee: num(info.total_fee, null),
-      trade_fee: num(info.trade_fee, null),
-    };
-  } catch (error) {
-    log("gmgn", `token fees lookup failed for ${String(mint).slice(0, 8)}: ${error.message}`);
-    return null;
-  }
-}
-
 const METEORA_DLMM_API = "https://dlmm.datapi.meteora.ag";
 const SUPPORTED_INTERVALS = new Set(["1m", "5m", "1h", "6h", "24h"]);
 
