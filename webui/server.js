@@ -213,6 +213,8 @@ app.get("/api/positions", async (req, res) => {
     const totalPnl = closed.reduce((s, p) => s + (p.net_pnl || 0), 0) + openUnrealizedPnl;
     const totalFees = closed.reduce((s, p) => s + (p.fees_earned || 0), 0) + open.reduce((s, p) => s + (p.fees_earned || 0), 0);
     const totalDeployed = closed.reduce((s, p) => s + (p.deposit || 0), 0) + open.reduce((s, p) => s + (p.deposit || 0), 0);
+    const openDeployed = open.reduce((s, p) => s + (p.deposit || 0), 0);
+    const closedDeployed = closed.reduce((s, p) => s + (p.deposit || 0), 0);
     const winCount = closed.filter((p) => (p.net_pnl ?? 0) > 0).length;
     const lossCount = closed.filter((p) => (p.net_pnl ?? 0) < 0).length;
     const breakEvenCount = closed.length - winCount - lossCount;
@@ -232,6 +234,8 @@ app.get("/api/positions", async (req, res) => {
         open_count: open.length,
         closed_count: closed.length,
         total_deployed_sol: +totalDeployed.toFixed(2),
+        open_deployed_sol: +openDeployed.toFixed(2),
+        closed_deployed_sol: +closedDeployed.toFixed(2),
         total_pnl_sol: fmtSol(totalPnl),
         total_fees_sol: fmtSol(totalFees),
         win_rate: (winCount + lossCount) > 0 ? +((winCount / (winCount + lossCount)) * 100).toFixed(1) : 0,
