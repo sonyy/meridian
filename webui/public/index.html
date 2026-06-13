@@ -398,7 +398,7 @@ function render(d) {
     document.getElementById('closedWrap').innerHTML =
       `<table class="closed-table">
         <thead><tr>
-          <th>Pair</th><th>Deposit</th><th>PnL</th><th>Fees</th><th>IL</th><th>Duration</th><th>Exit Reason</th><th>Open</th><th>Close</th>
+          <th>Pair</th><th>Deploy</th><th>PnL</th><th>Fees</th><th>IL</th><th>Duration</th><th>Exit Reason</th><th>Open</th><th>Close</th>
         </tr></thead>
         <tbody>
           ${closedList.map(p => `
@@ -440,7 +440,7 @@ function renderCard(p, c) {
       <div class="card-body">
         <div class="meta-grid">
           <span class="m-label">strategy</span><span class="m-value">${p.strategy || '-'}</span>
-          <span class="m-label">deposit</span><span class="m-value">${(p.deposit||0).toFixed(2)} SOL</span>
+          <span class="m-label">deploy</span><span class="m-value">${(p.deposit||0).toFixed(2)} SOL</span>
           <span class="m-label">net PnL</span><span class="m-value ${pnlClass}">${(p.net_pnl||0) >= 0 ? '+' : ''}${(p.net_pnl||0).toFixed(4)} SOL (${(p.pnl_pct||0) >= 0 ? '+' : ''}${(p.pnl_pct||0).toFixed(2)}%)</span>
           <span class="m-label">fees earned</span><span class="m-value">${fmtSol(p.fees_earned)} SOL</span>
           <span class="m-label">fee APR</span><span class="m-value">${p.annualized_fee_apr != null ? p.annualized_fee_apr.toFixed(1) + '%' : '-'}</span>
