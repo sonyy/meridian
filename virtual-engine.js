@@ -382,9 +382,13 @@ export function getVirtualPositionsAsReal() {
       entry_price: pp.entry_price || null,
       last_price: pp.last_price || null,
       deposit_amount: pp.deposit,
-      in_range: pp?.in_range_pct != null ? pp.in_range_pct > 0 : true,
-      minutes_out_of_range: pp.in_range_pct != null && pp.in_range_pct < 100
-        ? Math.round(minutesOpen * (1 - pp.in_range_pct / 100))
+      in_range: pp.last_price != null && pp.range?.lower != null && pp.range?.upper != null
+        ? pp.last_price >= pp.range.lower && pp.last_price <= pp.range.upper
+        : true,
+      minutes_out_of_range: pp.last_price != null && pp.range?.lower != null && pp.range?.upper != null
+        ? (pp.last_price < pp.range.lower || pp.last_price > pp.range.upper)
+          ? Math.round(minutesOpen)
+          : 0
         : 0,
       unclaimed_fees_usd: pp.fees_earned || 0, // paper positions fees auto-accrue in PnL
       total_value_usd: pp.deposit + pp.net_pnl,
