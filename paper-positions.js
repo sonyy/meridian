@@ -36,6 +36,23 @@ function save(state) {
   }
 }
 
+// ─── Concentration model ──────────────────────────────────────────────────────
+
+/**
+ * Estimate total active bins in a DLMM pool based on bin step.
+ * DLMM pools concentrate liquidity in a band around the current price.
+ * Narrow binStep → more bins for same price range → more total active bins.
+ *
+ * These are calibrated for memecoin pools where LPs typically cover
+ * a ~50-200% price band around the active price.
+ */
+function estimateActiveBins(binStep) {
+  if (binStep <= 10)  return 200;  // tight pools (SOL-USDC, stables)
+  if (binStep <= 50)  return 150;  // moderate
+  if (binStep <= 125) return 100;  // typical memecoin-SOL (Bountywork, Magpie)
+  return 60;                        // wide step (binStep ≥ 200)
+}
+
 // ─── DLMM helpers (lazy-loaded) ───────────────────────────────────────────────
 
 let _DLMM = null;
@@ -223,7 +240,11 @@ export async function openPaperPosition({
   const normEntryPrice = sdkMidPrice * priceScale; // ≈ currentPrice
 
   const numBins           = upperBinId - lowerBinId + 1;
-  const avgExistingBinTvl = tvl > 0 ? tvl / numBins : deposit_amount;
+  // Use estimated total active bins (not numBins) so avgTvlShare reflects
+  // DLMM concentration: our narrow-range deposit competes only against
+  // the active liquidity band, not the entire pool's TVL.
+  const totalActiveBins   = tvl > 0 ? estimateActiveBins(binStep) : 1;
+  const avgExistingBinTvl = tvl > 0 ? tvl / totalActiveBins : deposit_amount;
   const weights           = buildWeights(strategy_type, lowerBinId, upperBinId, activeBinId);
 
   const { xUsd, yUsd } = computeInitialSplit(deposit_amount, normEntryPrice, normLowerPrice, normUpperPrice);
