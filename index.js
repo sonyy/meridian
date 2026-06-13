@@ -8,6 +8,7 @@ import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
+import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
@@ -621,8 +622,10 @@ Screening skipped — max positions reached (${prePositions.total_positions}/${c
     }
 
     // Hard filters after token recon — block launchpads and excessive Jupiter bot holders
+    // Skipped for GMGN: platforms already filtered upstream; bundler/bot data from GMGN pipeline
     const filteredOut = [];
     const passing = allCandidates.filter(({ pool, ti }) => {
+      if (pool.gmgn) return true;
       const launchpad = ti?.launchpad ?? null;
       if (launchpad && config.screening.allowedLaunchpads?.length > 0 && !config.screening.allowedLaunchpads.includes(launchpad)) {
         log("screening", `Skipping ${pool.name} — launchpad ${launchpad} not in allow-list`);
@@ -646,26 +649,36 @@ Screening skipped — max positions reached (${prePositions.total_positions}/${c
 
     if (passing.length === 0) {
       const combined = filteredOut.length > 0 ? filteredOut : earlyFilteredExamples;
-      const combinedExamples = combined.slice(0, 3)
+      const combinedExamples = combined.slice(0, 5)
         .map((entry) => `- ${entry.name}: ${entry.reason}`)
         .join("\n");
-      screenReport = combinedExamples
-        ? `No candidates available.\nFiltered examples:\n${combinedExamples}`
-        : `No candidates available (all filtered by launchpad / holder-quality rules).`;
+      const funnelBlock = buildGmgnFunnelReport(gmgnStageCounts, gmgnAllFiltered, { fromStage: 2 });
+      const thresholds = `Thresholds: tvl>$${config.screening.minTvl} | vol>$${config.screening.minVolume} | organic>${config.screening.minOrganic}% | holders>${config.screening.minHolders} | fee/tvl>${config.screening.minFeeActiveTvlRatio}%`;
+      screenReport = funnelBlock
+        ? `No candidates available.\n\n${funnelBlock}`
+        : combinedExamples
+          ? `No candidates available.\nFiltered examples:\n${combinedExamples}`
+          : `No candidates available (all filtered).\n${thresholds}`;
       appendDecision({
         type: "no_deploy",
         actor: "SCREENER",
         summary: "No candidates available",
-        reason: combinedExamples || "All candidates filtered before deploy",
+        reason: funnelBlock || combinedExamples || "All candidates filtered before deploy",
         rejected: combined.slice(0, 5).map((entry) => `${entry.name}: ${entry.reason}`),
       });
       return screenReport;
+    }
+
+    if (passing.length <= 1 && gmgnStageCounts) {
+      const funnelBlock = buildGmgnFunnelReport(gmgnStageCounts, gmgnAllFiltered, { fromStage: 2 });
+      if (funnelBlock) log("screening", `GMGN funnel (sparse):\n${funnelBlock}`);
     }
 
     if (passing.length === 1) {
       const skipReason = getLoneCandidateSkipReason(passing[0]);
       if (skipReason) {
         const candidateName = passing[0].pool?.name || "unknown";
+        const funnelBlock = buildGmgnFunnelReport(gmgnStageCounts, gmgnAllFiltered, { fromStage: 2 });
         screenReport = [
           "⛔ NO DEPLOY",
           "",
@@ -679,7 +692,8 @@ Screening skipped — max positions reached (${prePositions.total_positions}/${c
           "",
           "REJECTED",
           `- ${candidateName}: ${skipReason}`,
-        ].join("\n");
+          funnelBlock ? `\n─────────────\n${funnelBlock}` : null,
+        ].filter(Boolean).join("\n");
         appendDecision({
           type: "no_deploy",
           actor: "SCREENER",
@@ -768,13 +782,13 @@ PRE-LOADED CANDIDATES (${passing.length} pools):
 ${candidateBlocks.join("\n\n")}
 
 STEPS:
-1. Decide if any candidate is actually worth deploying. One surviving candidate is not automatically good enough.
-2. Pick the best candidate based on narrative quality, smart wallets, and pool metrics.
-3. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
-   bins_below = round(${config.strategy.minBinsBelow} + (candidate volatility/5)*(${config.strategy.maxBinsBelow - config.strategy.minBinsBelow})) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}].
+1. Decide whether any candidate is worth deploying. A single remaining candidate is not automatically good enough.
+2. Pick the best candidate only if it has real conviction from narrative quality, smart wallets, and pool metrics. If the list has only one pool and it lacks narrative or smart-wallet confirmation, skip the cycle.
+3. If a pool qualifies, call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
+   strategy = ${config.strategy.strategy} (always use this, never change it).
+   bins_below = round(${config.strategy.minBinsBelow} + (candidate volatility/5)*${config.strategy.maxBinsBelow - config.strategy.minBinsBelow}) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}].
    pass deploy_position.volatility = the candidate volatility value.
-   For single-side SOL deploys, do not invent upside:
-   set amount_y only, keep amount_x = 0, keep bins_above = 0, and let the upper bin stay at the active bin.
+   bins_above = 0. Single-side SOL only: set amount_y, keep amount_x = 0.
 4. Report in this exact format (no tables, no extra sections):
    🚀 DEPLOYED
 
@@ -919,6 +933,11 @@ Summarize the current portfolio health, total fees earned, and performance of al
     }
   });
 
+  // Paper position tick — every 5m regardless of management interval
+  const paperSimTask = cron.schedule(`*/5 * * * *`, async () => {
+    tickPaperPositions().catch((e) => log("cron_error", `Paper sim tick failed: ${e.message}`));
+  });
+
   // Morning Briefing at 8:00 AM UTC+7 (1:00 AM UTC)
   const briefingTask = cron.schedule(`0 1 * * *`, async () => {
     await runBriefing();
@@ -929,9 +948,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
     await maybeRunMissedBriefing();
   }, { timezone: 'UTC' });
 
-  // Lightweight PnL poller — updates trailing TP state between management cycles, no LLM.
-  // Runs on public infra (RPC + Jupiter + Meteora deposits) so it can poll aggressively.
-  const pnlPollMs = Math.max(1, Number(config.pnl.pollIntervalSec ?? 3)) * 1000;
+  // Lightweight 30s PnL poller — updates trailing TP state between management cycles, no LLM
   let _pnlPollBusy = false;
   const pnlPollInterval = setInterval(async () => {
     if (_managementBusy || _pnlPollBusy) return;
@@ -986,9 +1003,9 @@ Summarize the current portfolio health, total fees earned, and performance of al
     } finally {
       _pnlPollBusy = false;
     }
-  }, pnlPollMs);
+  }, 30_000);
 
-  _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog];
+  _cronTasks = [mgmtTask, screenTask, healthTask, paperSimTask, briefingTask, briefingWatchdog];
   // Store interval ref so stopCronJobs can clear it
   _cronTasks._pnlPollInterval = pnlPollInterval;
   log("cron", `Cycles started — management every ${config.schedule.managementIntervalMin}m, screening every ${config.schedule.screeningIntervalMin}m`);
@@ -1065,8 +1082,6 @@ function formatCandidates(candidates) {
 function getDeterministicCloseRule(position, managementConfig) {
   const tracked = getTrackedPosition(position.position);
   const pnlSuspect = (() => {
-    // Couldn't-price-this-tick flag (e.g. Jupiter outage) — never act on PnL rules.
-    if (position.pnl_pct_suspicious) return true;
     if (position.pnl_pct == null) return false;
     if (position.pnl_pct > -90) return false;
     if (tracked?.amount_sol && (position.total_value_usd ?? 0) > 0.01) {
@@ -1240,6 +1255,7 @@ const MAX_HISTORY = 20;    // keep last 20 messages (10 exchanges)
 let _ttyInterface = null;
 let _latestCandidates = [];
 let _latestCandidatesAt = null;
+let _pendingInput = null; // { key, page, menuMsgId }
 
 function setLatestCandidates(candidates = []) {
   _latestCandidates = Array.isArray(candidates) ? candidates : [];
@@ -1284,7 +1300,8 @@ function formatConfigSnapshot() {
   return [
     "Config snapshot",
     "",
-    `Strategy: ${config.strategy.strategy} | binsBelow: ${config.strategy.minBinsBelow}-${config.strategy.maxBinsBelow} | default ${config.strategy.defaultBinsBelow}`,
+    `Screening source: ${config.screening.source}`,
+    `Strategy: ${config.strategy.strategy} | bins: [${config.strategy.minBinsBelow}–${config.strategy.maxBinsBelow}] (volatility-scaled)`,
     `Deploy: ${config.management.deployAmountSol} SOL | gasReserve: ${config.management.gasReserve} | maxPositions: ${config.risk.maxPositions}`,
     `Stop loss: ${config.management.stopLossPct}% | take profit: ${config.management.takeProfitPct}%`,
     `Trailing: ${config.management.trailingTakeProfit ? "on" : "off"} | trigger ${config.management.trailingTriggerPct}% | drop ${config.management.trailingDropPct}%`,
@@ -1292,11 +1309,12 @@ function formatConfigSnapshot() {
     `Repeat deploy cooldown: ${config.management.repeatDeployCooldownEnabled ? "on" : "off"} | ${config.management.repeatDeployCooldownTriggerCount}x / ${config.management.repeatDeployCooldownHours}h | min fee earned ${config.management.repeatDeployCooldownMinFeeEarnedPct}% | ${config.management.repeatDeployCooldownScope}`,
     `Yield floor: ${config.management.minFeePerTvl24h}% | min age ${config.management.minAgeBeforeYieldCheck}m`,
     `Screening: ${config.screening.category} / ${config.screening.timeframe} | TVL ${config.screening.minTvl}-${config.screening.maxTvl}`,
+    `GMGN interval: ${config.gmgn.interval} | OrderBy: ${config.gmgn.orderBy} | Dir: ${config.gmgn.direction}`,
     `Intervals: manage ${config.schedule.managementIntervalMin}m | screen ${config.schedule.screeningIntervalMin}m`,
     `Volatility check: ${config.management.volatilityCheckEnabled ? "on" : "off"} | max drop ${config.management.maxVolatilityDropPct}%`,
     `SL cooldown: ${config.management.stopLossCooldownHours}h | neg PnL cooldown: ${config.management.negativePnlCooldownHours}h (threshold: ${config.management.negativePnlCooldownThreshold}%)`,
     `HiveMind: ${isHiveMindEnabled() ? "enabled" : "disabled"}${config.hiveMind.agentId ? ` | ${config.hiveMind.agentId}` : ""}`,
-    `Virtual mode: ${config.virtual.mode ? "🟢 ON" : "⚪ OFF"}`, 
+    `Virtual mode: ${config.virtual.mode ? "🟢 ON" : "⚪ OFF"}`,
   ].join("\n");
 }
 
@@ -1349,7 +1367,6 @@ function settingValue(key) {
     strategy: config.strategy.strategy,
     minBinsBelow: config.strategy.minBinsBelow,
     maxBinsBelow: config.strategy.maxBinsBelow,
-    defaultBinsBelow: config.strategy.defaultBinsBelow,
     deployAmountSol: config.management.deployAmountSol,
     gasReserve: config.management.gasReserve,
     maxPositions: config.risk.maxPositions,
@@ -1404,13 +1421,20 @@ function stepButtons(key, label, step, { digits = 2 } = {}) {
   ];
 }
 
+function inputButton(key, label, { digits = 0 } = {}) {
+  const value = settingValue(key);
+  const shown = value == null ? "off" : Number.isFinite(Number(value)) ? String(parseFloat(Number(value).toFixed(digits))) : String(value);
+  return [settingButton(`${label}: ${shown} ✏`, `cfg:input:${key}`)];
+}
+
 function renderSettingsMenu(page = "main") {
   const title = page === "main" ? "Settings menu" : `Settings: ${page}`;
   const summary = [
     title,
     "",
     `Mode: ${config.management.solMode ? "SOL" : "USD"} | Relay: ${config.api.lpAgentRelayEnabled ? "on" : "off"}`,
-    `Strategy: ${config.strategy.strategy} | bins ${config.strategy.minBinsBelow}-${config.strategy.maxBinsBelow} | deploy ${config.management.deployAmountSol} SOL`,
+    `Screening: ${config.screening.source} | GMGN KOL ${config.gmgn.requireKol ? "required" : "preferred"}`,
+    `Strategy: ${config.strategy.strategy} | deploy ${config.management.deployAmountSol} SOL | max pos ${config.risk.maxPositions}`,
     `TP/SL: ${config.management.takeProfitPct}% / ${config.management.stopLossPct}% | trailing ${config.management.trailingTakeProfit ? "on" : "off"}`,
     `Token indicators: ${config.indicators.enabled ? "on" : "off"} | entry ${config.indicators.entryPreset} | ${fmtSettingValue(config.indicators.intervals)}`,
     `SOL ST: guard ${config.screening.requireSolSupertrend ? "on" : "off"} | timeframe ${config.screening.solSupertrendTimeframe || "both"}`,
@@ -1420,6 +1444,9 @@ function renderSettingsMenu(page = "main") {
     [
       settingButton("Main", "cfg:page:main"),
       settingButton("Risk", "cfg:page:risk"),
+      settingButton("Strategy", "cfg:page:strategy"),
+    ],
+    [
       settingButton("Screen", "cfg:page:screen"),
       settingButton("Token ind.", "cfg:page:indicators"),
       settingButton("GMGN", "cfg:page:gmgn"),
@@ -1460,8 +1487,10 @@ function renderSettingsMenu(page = "main") {
     rows = [
       [toggleButton("useDiscordSignals", "Discord signals"), toggleButton("blockPvpSymbols", "PVP hard block")],
       [
-        settingButton(`Strategy: spot`, "cfg:set:strategy:spot"),
-        settingButton(`Strategy: bid_ask`, "cfg:set:strategy:bid_ask"),
+        settingButton("5m", "cfg:set:gmgnInterval:5m"),
+        settingButton("1h", "cfg:set:gmgnInterval:1h"),
+        settingButton("6h", "cfg:set:gmgnInterval:6h"),
+        settingButton("24h", "cfg:set:gmgnInterval:24h"),
       ],
       [
         inputButton("gmgnMinVolume", "Min volume")[0],
@@ -1538,6 +1567,10 @@ function renderSettingsMenu(page = "main") {
     ];
   } else {
     rows = [
+      [
+        settingButton("Source: Meteora", "cfg:set:screeningSource:meteora"),
+        settingButton("Source: GMGN", "cfg:set:screeningSource:gmgn"),
+      ],
       [toggleButton("solMode", "SOL mode"), toggleButton("lpAgentRelayEnabled", "LPAgent relay")],
       [toggleButton("virtualMode", "Virtual mode"), toggleButton("trailingTakeProfit", "Trailing TP")],
       [settingButton("Show config", "cfg:show")],
@@ -1614,10 +1647,24 @@ async function applySettingsMenuCallback(msg) {
     if (key === "repeatDeployCooldownTriggerCount") value = Math.max(1, Math.round(value));
     if (key === "repeatDeployCooldownHours") value = Math.max(0, Math.round(value));
     if (key === "repeatDeployCooldownMinFeeEarnedPct") value = Math.max(0, value);
-    if (["minBinsBelow", "maxBinsBelow", "defaultBinsBelow"].includes(key)) value = Math.max(35, Math.round(value));
+    if (["minBinsBelow", "maxBinsBelow"].includes(key)) value = Math.max(35, Math.round(value));
     if (["deployAmountSol", "gasReserve", "maxDeployAmount"].includes(key)) value = Math.max(0, value);
   } else if (action === "set") {
     value = normalizeMenuValue(key, parts.slice(3).join(":"));
+  } else if (action === "input") {
+    const inputKey = parts[2];
+    const currentVal = settingValue(inputKey);
+    const inputPage = ["gmgnPreferredKolNames", "gmgnPreferredKolMinHoldPct", "gmgnDumpKolNames", "gmgnDumpKolMinHoldPct"].includes(inputKey) ? "kol"
+      : ["gmgnMinVolume", "gmgnMaxBundlerRate", "gmgnMinTokenAgeHours", "gmgnMaxTokenAgeHours"].includes(inputKey) ? "screen"
+      : inputKey.startsWith("gmgn") && inputKey !== "gmgnRequireKol" ? "gmgn"
+      : inputKey.startsWith("indicator") || inputKey === "chartIndicatorsEnabled" || inputKey === "rsiLength" || inputKey === "requireAllIntervals" ? "indicators"
+      : ["minBinsBelow", "maxBinsBelow"].includes(inputKey) ? "strategy"
+      : ["useDiscordSignals", "blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "screeningSource", "gmgnRequireKol"].includes(inputKey) ? "screen"
+      : "risk";
+    _pendingInput = { key: inputKey, page: inputPage, menuMsgId: msg.messageId };
+    await answerCallbackQuery(msg.callbackQueryId);
+    await sendMessage(`Enter new value for ${inputKey} (current: ${currentVal ?? "off"}):\nSend a number, or "off" to clear.`);
+    return;
   } else {
     await answerCallbackQuery(msg.callbackQueryId, "Unknown action");
     return;
@@ -1681,7 +1728,8 @@ async function runDeterministicScreen(limit = 5) {
     const lines = candidates.map((pool, i) => {
       const feeTvl = pool.fee_active_tvl_ratio ?? pool.fee_tvl_ratio ?? "?";
       const vol = pool.volume_window ?? pool.volume_24h ?? "?";
-      return `${i + 1}. ${pool.name} | ${pool.pool}\n   fee/aTVL ${feeTvl}% | vol $${vol} | organic ${pool.organic_score ?? "?"}`;
+      const source = pool.gmgn ? ` | GMGN smart ${pool.gmgn_smart_wallets ?? "?"}, KOL ${pool.gmgn_kol_wallets ?? "?"}, total fee ${pool.gmgn_total_fee_sol ?? "?"} SOL` : ` | organic ${pool.organic_score ?? "?"}`;
+      return `${i + 1}. ${pool.name} | ${pool.pool}\n   fee/aTVL ${feeTvl}% | vol $${vol}${source}`;
     });
     return `Top candidates (${candidates.length})\n\n${lines.join("\n")}`;
   }
@@ -1773,6 +1821,29 @@ async function drainTelegramQueue() {
 async function telegramHandler(msg) {
   const text = msg?.text?.trim();
   if (!text) return;
+
+  if (_pendingInput && !msg.isCallback && !text.startsWith("/")) {
+    const { key, page, menuMsgId } = _pendingInput;
+    _pendingInput = null;
+    let value;
+    if (text.toLowerCase() === "off" || text.toLowerCase() === "null") {
+      value = null;
+    } else {
+      value = Number(text);
+      if (!Number.isFinite(value)) {
+        await sendMessage(`Invalid value "${text}" — must be a number or "off".`);
+        return;
+      }
+    }
+    const result = await executeTool("update_config", { changes: { [key]: value }, reason: "Telegram input field" });
+    if (!result?.success) {
+      await sendMessage(`Failed to update ${key}.`);
+      return;
+    }
+    await showSettingsMenu({ messageId: menuMsgId, page });
+    return;
+  }
+
   if (msg?.isCallback && text.startsWith("cfg:")) {
     try {
       await applySettingsMenuCallback(msg);

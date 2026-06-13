@@ -5,7 +5,7 @@ import { log } from "../logger.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { sendMessage, sendHTML } from "../telegram.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
-import { getAgentMeridianBase, getAgentMeridianHeaders } from "./agent-meridian.js";
+import { discoverGmgnPools } from "./gmgn.js";
 
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
@@ -13,6 +13,7 @@ const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
 const MIN_VOLATILITY_TIMEFRAME = "30m";
 const TIMEFRAME_MINUTES = {
   "5m": 5,
+  "15m": 15,
   "30m": 30,
   "1h": 60,
   "2h": 120,
@@ -31,6 +32,9 @@ function normalizeSymbol(symbol) {
 }
 
 function scoreCandidate(pool) {
+  if (Number.isFinite(Number(pool.gmgn_score))) {
+    return Number(pool.gmgn_score) + Number(pool.fee_active_tvl_ratio || 0) * 500;
+  }
   const feeTvl = Number(pool.fee_active_tvl_ratio || 0);
   const organic = Number(pool.organic_score || 0);
   const volume = Number(pool.volume_window || 0);
@@ -45,8 +49,8 @@ function numeric(value) {
 }
 
 function isUsableVolatility(value) {
-  const n = Number(value);
-  return Number.isFinite(n) && n > 0;
+  const n = numeric(value);
+  return n != null && n > 0;
 }
 
 function includesCaseInsensitive(values, value) {
@@ -111,11 +115,9 @@ function getRawPoolScreeningRejectReason(pool, s) {
   if (s.maxTvl != null && tvl > s.maxTvl) return `TVL ${tvl} above maxTvl ${s.maxTvl}`;
   if (binStep == null || binStep < s.minBinStep) return `bin_step ${binStep ?? "unknown"} below minBinStep ${s.minBinStep}`;
   if (binStep > s.maxBinStep) return `bin_step ${binStep} above maxBinStep ${s.maxBinStep}`;
+  if (!isUsableVolatility(volatility)) return `volatility ${volatility ?? "unknown"} unusable`;
   if (feeActiveTvlRatio == null || feeActiveTvlRatio < s.minFeeActiveTvlRatio) {
     return `fee/active-TVL ${feeActiveTvlRatio ?? "unknown"} below minFeeActiveTvlRatio ${s.minFeeActiveTvlRatio}`;
-  }
-  if (!isUsableVolatility(volatility)) {
-    return `volatility ${volatility ?? "unknown"} is unusable`;
   }
   if (baseOrganic == null || baseOrganic < s.minOrganic) {
     return `base organic ${baseOrganic ?? "unknown"} below minOrganic ${s.minOrganic}`;
@@ -147,8 +149,8 @@ function getRawPoolScreeningRejectReason(pool, s) {
 }
 
 async function fetchDiscordSignalCandidates() {
-  const res = await fetch(`${getAgentMeridianBase()}/signals/discord/candidates`, {
-    headers: getAgentMeridianHeaders(),
+  const res = await fetch(`${config.api.url}/signals/discord/candidates`, {
+    headers: config.api.publicApiKey ? { "x-api-key": config.api.publicApiKey } : {},
   });
   if (!res.ok) throw new Error(`discord signal candidates ${res.status}`);
   const data = await res.json();
@@ -566,6 +568,24 @@ export async function getTopCandidates({ limit = 10, occupiedPools, occupiedMint
   let { pools } = discovery;
   const filteredOut = Array.isArray(discovery.filtered_examples) ? [...discovery.filtered_examples] : [];
 
+  if (source === "gmgn") {
+    const before = pools.length;
+    pools = pools.filter((p) => {
+      if (isBlacklisted(p.base?.mint)) {
+        log("blacklist", `Filtered blacklisted token ${p.base?.symbol} (${p.base?.mint?.slice(0, 8)})`);
+        pushFilteredReason(filteredOut, p, "blacklisted token");
+        return false;
+      }
+      if (p.dev && isDevBlocked(p.dev)) {
+        log("dev_blocklist", `Filtered blocked deployer ${p.dev?.slice(0, 8)} token ${p.base?.symbol}`);
+        pushFilteredReason(filteredOut, p, "blocked deployer");
+        return false;
+      }
+      return true;
+    });
+    if (pools.length < before) log("blacklist", `GMGN: filtered ${before - pools.length} blacklisted/blocked pool(s)`);
+  }
+
   // Exclude pools where the wallet already has an open position
   // Accept optional override (e.g. virtual positions) — avoids calling getMyPositions which
   // returns real on-chain positions, not virtual ones
@@ -605,7 +625,7 @@ export async function getTopCandidates({ limit = 10, occupiedPools, occupiedMint
         return false;
       }
       if (!isUsableVolatility(p.volatility)) {
-        pushFilteredReason(filteredOut, p, `volatility ${p.volatility ?? "unknown"} is unusable`);
+        pushFilteredReason(filteredOut, p, `volatility ${p.volatility ?? "unknown"} unusable`);
         return false;
       }
       if (occupiedPools.has(p.pool)) {
@@ -727,7 +747,12 @@ export async function getTopCandidates({ limit = 10, occupiedPools, occupiedMint
   log("gmgn", `getTopCandidates: returning ${eligible.length} candidates`);
   return {
     candidates: eligible,
-    total_screened: pools.length,
+    total_screened: discovery.total ?? pools.length,
+    source,
+    stage_counts: discovery.stage_counts
+      ? { ranked: discovery.total, ...discovery.stage_counts }
+      : null,
+    all_filtered: filteredOut,
     filtered_examples: filteredOut.slice(0, 3),
   };
 }
@@ -825,8 +850,8 @@ function round(n) {
 }
 
 function fix(n, decimals) {
-  const value = Number(n);
-  return Number.isFinite(value) ? Number(value.toFixed(decimals)) : null;
+  const value = numeric(n);
+  return value != null ? Number(value.toFixed(decimals)) : null;
 }
 
 function pushFilteredReason(list, pool, reason, stage = 6) {

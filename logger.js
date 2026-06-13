@@ -59,18 +59,26 @@ function actionHint(action) {
 }
 
 export function logAction(action) {
+  const { tool, args, result, duration_ms, success } = action;
   const timestamp = new Date().toISOString();
-
-  const entry = { timestamp, ...action };
-
-  // Console: single clean line, no raw JSON
-  const status = action.success ? "✓" : "✗";
-  const dur = action.duration_ms != null ? ` (${action.duration_ms}ms)` : "";
-  const hint = actionHint(action);
-  console.log(`[${action.tool}] ${status}${hint}${dur}`);
-
-  // File: full JSON for audit trail
+  const entry = { timestamp, tool, args, result, success, duration_ms };
   const dateStr = timestamp.split("T")[0];
   const actionsFile = path.join(LOG_DIR, `actions-${dateStr}.jsonl`);
   fs.appendFileSync(actionsFile, JSON.stringify(entry) + "\n");
+}
+
+/**
+ * Log a portfolio snapshot (for tracking performance over time).
+ */
+export function logSnapshot(snapshot) {
+  const timestamp = new Date().toISOString();
+
+  const entry = {
+    timestamp,
+    ...snapshot,
+  };
+
+  const dateStr = timestamp.split("T")[0];
+  const snapshotFile = path.join(LOG_DIR, `snapshots-${dateStr}.jsonl`);
+  fs.appendFileSync(snapshotFile, JSON.stringify(entry) + "\n");
 }

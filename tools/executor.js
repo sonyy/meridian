@@ -19,6 +19,7 @@ import { setPositionInstruction } from "../state.js";
 import { getPoolMemory, addPoolNote } from "../pool-memory.js";
 import { addStrategy, listStrategies, getStrategy, setActiveStrategy, removeStrategy } from "../strategy-library.js";
 import { addToBlacklist, removeFromBlacklist, listBlacklist } from "../token-blacklist.js";
+import { open_paper_position, get_paper_position, close_paper_position, list_paper_positions } from "./simulator.js";
 import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../smart-wallets.js";
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
@@ -36,6 +37,7 @@ const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
 const MIN_VOLATILITY_TIMEFRAME = "30m";
 const TIMEFRAME_MINUTES = {
   "5m": 5,
+  "15m": 15,
   "30m": 30,
   "1h": 60,
   "2h": 120,
@@ -45,6 +47,23 @@ const TIMEFRAME_MINUTES = {
 };
 import { log, logAction } from "../logger.js";
 import { sendMessage, sendHTML, notifyDeploy, notifyClose, notifySwap } from "../telegram.js";
+
+const SENSITIVE_CONFIG_KEYS = new Set([
+  "gmgnApiKey",
+  "hiveMindApiKey",
+  "publicApiKey",
+]);
+
+function redactConfigValue(key, value) {
+  if (!SENSITIVE_CONFIG_KEYS.has(key)) return value;
+  return typeof value === "string" && value ? "***redacted***" : value;
+}
+
+function redactAppliedConfig(applied) {
+  return Object.fromEntries(
+    Object.entries(applied || {}).map(([key, value]) => [key, redactConfigValue(key, value)]),
+  );
+}
 
 function numberOrNull(value) {
   const n = Number(value);
@@ -183,73 +202,12 @@ async function validateDeployPoolThresholds(args) {
 let _cronRestarter = null;
 export function registerCronRestarter(fn) { _cronRestarter = fn; }
 
-function coerceBoolean(value, key) {
-  if (typeof value === "boolean") return value;
-  if (typeof value === "string") {
-    const normalized = value.trim().toLowerCase();
-    if (normalized === "true") return true;
-    if (normalized === "false") return false;
-  }
-  throw new Error(`${key} must be true or false`);
-}
-
-function coerceFiniteNumber(value, key) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) throw new Error(`${key} must be a finite number`);
-  return n;
-}
-
-function coerceString(value, key) {
-  if (typeof value !== "string") throw new Error(`${key} must be a string`);
-  return value.trim();
-}
-
-function coerceStringArray(value, key) {
-  if (!Array.isArray(value)) throw new Error(`${key} must be an array of strings`);
-  return value.map((entry) => coerceString(entry, key)).filter(Boolean);
-}
-
-function normalizeConfigValue(key, value) {
-  const booleanKeys = new Set([
-    "excludeHighSupplyConcentration",
-    "useDiscordSignals",
-    "avoidPvpSymbols",
-    "blockPvpSymbols",
-    "autoSwapAfterClaim",
-    "trailingTakeProfit",
-    "solMode",
-    "darwinEnabled",
-    "lpAgentRelayEnabled",
-  ]);
-  const arrayKeys = new Set(["allowedLaunchpads", "blockedLaunchpads"]);
-  const stringKeys = new Set([
-    "timeframe",
-    "category",
-    "discordSignalMode",
-    "strategy",
-    "managementModel",
-    "screeningModel",
-    "generalModel",
-    "hiveMindUrl",
-    "hiveMindApiKey",
-    "agentId",
-    "hiveMindPullMode",
-    "publicApiKey",
-    "agentMeridianApiUrl",
-    "pnlSource",
-    "pnlRpcUrl",
-    "gmgnFeeSource",
-    "gmgnApiKey",
-  ]);
-  if (value === null) return null;
-  if (booleanKeys.has(key)) return coerceBoolean(value, key);
-  if (arrayKeys.has(key)) return coerceStringArray(value, key);
-  if (stringKeys.has(key)) return coerceString(value, key);
-  return coerceFiniteNumber(value, key);
-}
-
 // Map tool names to implementations
 const toolMap = {
+  open_paper_position,
+  get_paper_position,
+  close_paper_position,
+  list_paper_positions,
   discover_pools: discoverPools,
   get_top_candidates: getTopCandidates,
   get_pool_detail: getPoolDetail,
@@ -348,6 +306,7 @@ const toolMap = {
     // Flat key → config section mapping (covers everything in config.js)
     const CONFIG_MAP = {
       // screening
+      screeningSource: ["screening", "source"],
       minFeeActiveTvlRatio: ["screening", "minFeeActiveTvlRatio"],
       excludeHighSupplyConcentration: ["screening", "excludeHighSupplyConcentration"],
       minTvl: ["screening", "minTvl"],
@@ -389,7 +348,6 @@ const toolMap = {
       minVolumeToRebalance: ["management", "minVolumeToRebalance"],
       stopLossPct: ["management", "stopLossPct"],
       takeProfitPct: ["management", "takeProfitPct"],
-      takeProfitFeePct: ["management", "takeProfitPct"],
       trailingTakeProfit: ["management", "trailingTakeProfit"],
       trailingTriggerPct: ["management", "trailingTriggerPct"],
       trailingDropPct: ["management", "trailingDropPct"],
@@ -400,6 +358,11 @@ const toolMap = {
       gasReserve: ["management", "gasReserve"],
       positionSizePct: ["management", "positionSizePct"],
       minAgeBeforeYieldCheck: ["management", "minAgeBeforeYieldCheck"],
+      volatilityCheckEnabled: ["management", "volatilityCheckEnabled"],
+      maxVolatilityDropPct: ["management", "maxVolatilityDropPct"],
+      stopLossCooldownHours: ["management", "stopLossCooldownHours"],
+      negativePnlCooldownHours: ["management", "negativePnlCooldownHours"],
+      negativePnlCooldownThreshold: ["management", "negativePnlCooldownThreshold"],
       // risk
       maxPositions: ["risk", "maxPositions"],
       maxDeployAmount: ["risk", "maxDeployAmount"],
@@ -415,8 +378,8 @@ const toolMap = {
       maxTokens: ["llm", "maxTokens"],
       maxSteps: ["llm", "maxSteps"],
       // strategy
-      strategy: ["strategy", "strategy"],
-      binsBelow: ["strategy", "maxBinsBelow", ["maxBinsBelow"]],
+      strategy:     ["strategy", "strategy"],
+      binsBelow:    ["strategy", "maxBinsBelow", ["maxBinsBelow"]],
       minBinsBelow: ["strategy", "minBinsBelow"],
       maxBinsBelow: ["strategy", "maxBinsBelow"],
       defaultBinsBelow: ["strategy", "defaultBinsBelow"],
@@ -429,14 +392,52 @@ const toolMap = {
       publicApiKey: ["api", "publicApiKey"],
       agentMeridianApiUrl: ["api", "url"],
       lpAgentRelayEnabled: ["api", "lpAgentRelayEnabled"],
-      // pnl fetcher / poller
-      pnlSource: ["pnl", "source", ["pnlSource"]],
-      pnlRpcUrl: ["pnl", "rpcUrl", ["pnlRpcUrl"]],
-      pnlPollIntervalSec: ["pnl", "pollIntervalSec", ["pnlPollIntervalSec"]],
-      pnlDepositCacheTtlSec: ["pnl", "depositCacheTtlSec", ["pnlDepositCacheTtlSec"]],
-      // gmgn fee source
-      gmgnFeeSource: ["gmgn", "feeSource", ["gmgnFeeSource"]],
-      gmgnApiKey: ["gmgn", "apiKey", ["gmgnApiKey"]],
+      // GMGN screening
+      gmgnApiKey: ["gmgn", "apiKey"],
+      gmgnBaseUrl: ["gmgn", "baseUrl"],
+      gmgnInterval: ["gmgn", "interval"],
+      gmgnOrderBy: ["gmgn", "orderBy"],
+      gmgnDirection: ["gmgn", "direction"],
+      gmgnLimit: ["gmgn", "limit"],
+      gmgnEnrichLimit: ["gmgn", "enrichLimit"],
+      gmgnRequestDelayMs: ["gmgn", "requestDelayMs"],
+      gmgnMaxRetries: ["gmgn", "maxRetries"],
+      gmgnHoldersLimit: ["gmgn", "holdersLimit"],
+      gmgnKlineResolution: ["gmgn", "klineResolution"],
+      gmgnKlineLookbackMinutes: ["gmgn", "klineLookbackMinutes"],
+      gmgnFilters: ["gmgn", "filters"],
+      gmgnPlatforms: ["gmgn", "platforms"],
+      gmgnMinMcap: ["gmgn", "minMcap"],
+      gmgnMaxMcap: ["gmgn", "maxMcap"],
+      gmgnMinVolume: ["gmgn", "minVolume"],
+      gmgnMinHolders: ["gmgn", "minHolders"],
+      gmgnMinTokenAgeHours: ["gmgn", "minTokenAgeHours"],
+      gmgnMaxTokenAgeHours: ["gmgn", "maxTokenAgeHours"],
+      gmgnAthFilterPct: ["gmgn", "athFilterPct"],
+      gmgnMaxTop10HolderRate: ["gmgn", "maxTop10HolderRate"],
+      gmgnMaxBundlerRate: ["gmgn", "maxBundlerRate"],
+      gmgnMaxRatTraderRate: ["gmgn", "maxRatTraderRate"],
+      gmgnMaxFreshWalletRate: ["gmgn", "maxFreshWalletRate"],
+      gmgnMaxDevTeamHoldRate: ["gmgn", "maxDevTeamHoldRate"],
+      gmgnMaxBotDegenRate: ["gmgn", "maxBotDegenRate"],
+      gmgnMaxSniperCount: ["gmgn", "maxSniperCount"],
+      gmgnMaxSniperHoldRate: ["gmgn", "maxSniperHoldRate"],
+      gmgnPreferredKolNames: ["gmgn", "preferredKolNames"],
+      gmgnPreferredKolMinHoldPct: ["gmgn", "preferredKolMinHoldPct"],
+      gmgnDumpKolNames: ["gmgn", "dumpKolNames"],
+      gmgnDumpKolMinHoldPct: ["gmgn", "dumpKolMinHoldPct"],
+      gmgnRequireKol: ["gmgn", "requireKol"],
+      gmgnMinKolCount: ["gmgn", "minKolCount"],
+      gmgnMinSmartDegenCount: ["gmgn", "minSmartDegenCount"],
+      gmgnMinTotalFeeSol: ["gmgn", "minTotalFeeSol"],
+      gmgnIndicatorFilter: ["gmgn", "indicatorFilter"],
+      gmgnIndicatorInterval: ["gmgn", "indicatorInterval"],
+      gmgnRequireBullishSt: ["gmgn", "indicatorRules", "requireBullishSupertrend"],
+      gmgnRejectAtBottom: ["gmgn", "indicatorRules", "rejectAlreadyAtBottom"],
+      gmgnRequireAboveSt: ["gmgn", "indicatorRules", "requireAboveSupertrend"],
+      gmgnMinRsi: ["gmgn", "indicatorRules", "minRsi"],
+      gmgnMaxRsi: ["gmgn", "indicatorRules", "maxRsi"],
+      gmgnRequireBbPosition: ["gmgn", "indicatorRules", "requireBbPosition"],
       // chart indicators
       chartIndicatorsEnabled: ["indicators", "enabled", ["chartIndicators", "enabled"]],
       indicatorEntryPreset: ["indicators", "entryPreset", ["chartIndicators", "entryPreset"]],
@@ -472,24 +473,20 @@ const toolMap = {
     }
 
     const STRATEGY_BIN_KEYS = new Set(["binsBelow", "minBinsBelow", "maxBinsBelow", "defaultBinsBelow"]);
+
     for (const [key, val] of Object.entries(changes)) {
       const match = CONFIG_MAP[key] ? [key, CONFIG_MAP[key]] : CONFIG_MAP_LOWER[key.toLowerCase()];
       if (!match) { unknown.push(key); continue; }
-      try {
-        let normalizedVal = val;
-        if (STRATEGY_BIN_KEYS.has(match[0])) {
-          const numericVal = Number(val);
-          if (!Number.isFinite(numericVal)) {
-            throw new Error(`${match[0]} must be a finite number`);
-          }
-          normalizedVal = Math.max(MIN_SAFE_BINS_BELOW, Math.round(numericVal));
-        } else {
-          normalizedVal = normalizeConfigValue(match[0], val);
+      let normalizedVal = val;
+      if (STRATEGY_BIN_KEYS.has(match[0])) {
+        const numericVal = Number(val);
+        if (!Number.isFinite(numericVal)) {
+          unknown.push(key);
+          continue;
         }
-        applied[match[0]] = normalizedVal;
-      } catch (error) {
-        return { success: false, error: error.message, key: match[0], reason };
+        normalizedVal = Math.max(MIN_SAFE_BINS_BELOW, Math.round(numericVal));
       }
+      applied[match[0]] = normalizedVal;
     }
 
     if (Object.keys(applied).length === 0) {
@@ -512,7 +509,7 @@ const toolMap = {
     for (const [key, val] of Object.entries(applied)) {
       if (key.startsWith("_")) continue;
       const [section, field, third] = CONFIG_MAP[key] || [];
-      const isNestedField = typeof third === "string"; // string = nested subfield, array = persistPath
+      const isNestedField = typeof third === "string";
       if (isNestedField) {
         if (!config[section][field] || typeof config[section][field] !== "object") config[section][field] = {};
         const before = config[section][field][third];
@@ -525,25 +522,6 @@ const toolMap = {
       }
     }
 
-    // Auto-scale fee/volume when timeframe changes (unless user set them explicitly in same call).
-    if (applied.timeframe != null && applied.minFeeActiveTvlRatio == null && applied.minVolume == null) {
-      const tf = normalizeTimeframe(applied.timeframe);
-      applied.timeframe = tf;
-      const scaled = scaleScreeningToTimeframe(tf);
-      applied.minFeeActiveTvlRatio = scaled.minFeeActiveTvlRatio;
-      applied.minVolume = scaled.minVolume;
-      applied._timeframeScaled = true;
-      log("config", `timeframe ${tf} → auto-scaled minFeeActiveTvlRatio=${scaled.minFeeActiveTvlRatio}, minVolume=${scaled.minVolume}`);
-    }
-
-    // Apply to live config immediately after the persisted config is known-good.
-    for (const [key, val] of Object.entries(applied)) {
-      if (key.startsWith("_")) continue;
-      const [section, field] = CONFIG_MAP[key];
-      const before = config[section][field];
-      config[section][field] = val;
-      log("config", `update_config: config.${section}.${field} ${before} → ${val} (verify: ${config[section][field]})`);
-    }
     if (
       applied.binsBelow != null ||
       applied.minBinsBelow != null ||
@@ -552,15 +530,19 @@ const toolMap = {
     ) {
       config.strategy.minBinsBelow = Math.max(MIN_SAFE_BINS_BELOW, Math.round(Number(config.strategy.minBinsBelow ?? MIN_SAFE_BINS_BELOW)));
       config.strategy.maxBinsBelow = Math.max(config.strategy.minBinsBelow, Math.round(Number(config.strategy.maxBinsBelow ?? config.strategy.minBinsBelow)));
-      config.strategy.defaultBinsBelow = Math.max(
-        config.strategy.minBinsBelow,
-        Math.min(
-          config.strategy.maxBinsBelow,
-          Math.round(Number(config.strategy.defaultBinsBelow ?? config.strategy.maxBinsBelow)),
-        ),
-      );
     }
 
+    // Persist GMGN tuning to gmgn-config.json, and everything else to user-config.json.
+    let userConfig = {};
+    if (fs.existsSync(USER_CONFIG_PATH)) {
+      try { userConfig = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8")); } catch { /**/ }
+    }
+    let gmgnConfig = {};
+    if (fs.existsSync(GMGN_CONFIG_PATH)) {
+      try { gmgnConfig = JSON.parse(fs.readFileSync(GMGN_CONFIG_PATH, "utf8")); } catch { /**/ }
+    }
+    let wroteUserConfig = false;
+    let wroteGmgnConfig = false;
     for (const [key, val] of Object.entries(applied)) {
       if (key.startsWith("_")) continue;
       const [section, field, third] = CONFIG_MAP[key] || [];
@@ -588,28 +570,35 @@ const toolMap = {
       } else {
         userConfig[key] = val;
       }
+      wroteUserConfig = true;
     }
-    userConfig._lastAgentTune = new Date().toISOString();
-    fs.writeFileSync(USER_CONFIG_PATH, JSON.stringify(userConfig, null, 2));
+    const tunedAt = new Date().toISOString();
+    if (wroteUserConfig) {
+      userConfig._lastAgentTune = tunedAt;
+      fs.writeFileSync(USER_CONFIG_PATH, JSON.stringify(userConfig, null, 2));
+    }
+    if (wroteGmgnConfig) {
+      gmgnConfig._lastAgentTune = tunedAt;
+      fs.writeFileSync(GMGN_CONFIG_PATH, JSON.stringify(gmgnConfig, null, 2));
+    }
 
     // Restart cron jobs if intervals changed
-    const intervalChanged = applied.managementIntervalMin != null || applied.screeningIntervalMin != null || applied.pnlPollIntervalSec != null;
+    const intervalChanged = applied.managementIntervalMin != null || applied.screeningIntervalMin != null;
     if (intervalChanged && _cronRestarter) {
       _cronRestarter();
-      log("config", `Cron restarted — management: ${config.schedule.managementIntervalMin}m, screening: ${config.schedule.screeningIntervalMin}m, pnlPoll: ${config.pnl.pollIntervalSec}s`);
+      log("config", `Cron restarted — management: ${config.schedule.managementIntervalMin}m, screening: ${config.schedule.screeningIntervalMin}m`);
     }
 
-    // Skip repeated volatility-driven interval changes; they are operational tuning, not reusable lessons.
     const lessonsKeys = Object.keys(applied).filter(
       k => !k.startsWith("_") && k !== "managementIntervalMin" && k !== "screeningIntervalMin"
     );
     if (lessonsKeys.length > 0) {
-      const summary = lessonsKeys.map(k => `${k}=${applied[k]}`).join(", ");
+      const summary = lessonsKeys.map(k => `${k}=${redactConfigValue(k, applied[k])}`).join(", ");
       addLesson(`[SELF-TUNED] Changed ${summary} — ${reason}`, ["self_tune", "config_change"]);
     }
 
-    log("config", `Agent self-tuned: ${JSON.stringify(applied)} — ${reason}`);
-    return { success: true, applied, unknown, reason };
+    log("config", `Agent self-tuned: ${JSON.stringify(redactAppliedConfig(applied))} — ${reason}`);
+    return { success: true, applied: redactAppliedConfig(applied), unknown, reason };
   },
 };
 
@@ -936,8 +925,8 @@ async function runSafetyChecks(name, args) {
       }
 
       // Check amount limits
-      const amountY = deployAmountY;
-      if (!Number.isFinite(amountY) || amountY <= 0) {
+      const amountY = args.amount_y ?? args.amount_sol ?? 0;
+      if (amountY <= 0) {
         return {
           pass: false,
           reason: `Must provide a positive SOL amount (amount_y).`,

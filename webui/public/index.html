@@ -178,11 +178,6 @@
     position: absolute; bottom: 0; width: 1.5px; height: 100%;
     z-index: 3; pointer-events: none;
   }
-  .pnl-tri {
-    position: absolute; top: 0; width: 0; height: 0;
-    border-left: 4px solid transparent; border-right: 4px solid transparent;
-    border-top: 6px solid #888b98; z-index: 3;
-  }
   .pnl-cursor-label {
     position: absolute; bottom: 0;
     font-size: 7px; font-family: 'IBM Plex Mono', monospace; white-space: nowrap;
@@ -663,7 +658,6 @@ function renderRangeBar(rangeEl, data) {
   const labelL = ensureRangeChild(rangeEl, '.range-label.l', 'span', 'range-label l', { position: 'absolute', top: '50%', transform: 'translateY(-50%)', fontSize: '9px', fontFamily: "'IBM Plex Mono', monospace", color: 'var(--text2)', whiteSpace: 'nowrap' });
   const labelR = ensureRangeChild(rangeEl, '.range-label.r', 'span', 'range-label r', { position: 'absolute', top: '50%', transform: 'translateY(-50%)', fontSize: '9px', fontFamily: "'IBM Plex Mono', monospace", color: 'var(--text2)', whiteSpace: 'nowrap' });
   const cursorLine = ensureRangeChild(rangeEl, '.cursor-line', 'div', 'cursor-line', { position: 'absolute', bottom: '0', width: '1.5px', height: '100%', background: C_BLUE, zIndex: '5' });
-  const cursorTri = ensureRangeChild(rangeEl, '.cursor-triangle', 'div', 'cursor-triangle', { position: 'absolute', top: '0', width: '0', height: '0', borderLeft: '3px solid transparent', borderRight: '3px solid transparent', borderTop: `5px solid ${C_BLUE}`, zIndex: '5' });
   const cursorLabel = ensureRangeChild(rangeEl, '.cursor-price', 'span', 'cursor-price', { position: 'absolute', bottom: '0', fontSize: '7px', fontFamily: "'IBM Plex Mono', monospace", color: C_BLUE, zIndex: '5', lineHeight: '10px', whiteSpace: 'nowrap' });
 
   fill.style.left = `${data.fillLeft}%`;
@@ -677,8 +671,6 @@ function renderRangeBar(rangeEl, data) {
   labelR.textContent = data.upper.toExponential(2);
 
   cursorLine.style.left = `${data.curPct}%`;
-  cursorTri.style.left = `${data.curPct}%`;
-  cursorTri.style.transform = 'translateX(-50%)';
   cursorLabel.style.left = `${data.curPct}%`;
   cursorLabel.style.transform = 'translateX(2px)';
   cursorLabel.textContent = data.curPrice.toExponential(3);
@@ -713,18 +705,21 @@ function renderPnlBar(el, d) {
   tpLbl.style.transform = 'translateX(3px)';
   tpLbl.textContent = `+${d.tpPct}%`;
 
-  // Cursor triangle
-  let tri = el.querySelector('.pnl-tri');
-  if (!tri) { tri = document.createElement('div'); tri.className = 'pnl-tri'; el.appendChild(tri); }
-  tri.style.left = `${d.curX}%`;
-  tri.style.transform = 'translateX(-50%)';
-  tri.style.borderTopColor = C_BLUE;
-
   // Cursor vertical line
   let cur = el.querySelector('.pnl-cursor');
   if (!cur) { cur = document.createElement('div'); cur.className = 'pnl-cursor'; el.appendChild(cur); }
   cur.style.left = `${d.curX}%`;
   cur.style.background = C_BLUE;
+
+  // Zero vertical line (white)
+  let zero = el.querySelector('.pnl-zero-line');
+  if (!zero) { zero = document.createElement('div'); zero.className = 'pnl-zero-line'; el.appendChild(zero); }
+  const pnlSpanZ = d.tpPct - d.slPct;
+  const zoomZ = 0.3;
+  const barLoZ = d.slPct - pnlSpanZ * zoomZ;
+  const barSpanZ = (d.tpPct + pnlSpanZ * zoomZ) - barLoZ || 1;
+  const zeroX = ((0 - barLoZ) / barSpanZ) * 100;
+  zero.style.cssText = `position:absolute;top:0;width:1px;height:100%;background:rgba(255,255,255,0.4);z-index:2;pointer-events:none;left:${zeroX}%`;
 
   // Cursor label
   let curLbl = el.querySelector('.pnl-cursor-label');

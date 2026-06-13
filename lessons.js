@@ -320,7 +320,16 @@ function derivLesson(perf) {
   };
 }
 
-// ─── Adaptive Threshold Evolution ──────────────────────────────
+/**
+ * Remove a lesson by ID.
+ */
+export function removeLesson(id) {
+  const data = load();
+  const before = data.lessons.length;
+  data.lessons = data.lessons.filter((l) => l.id !== id);
+  save(data);
+  return before - data.lessons.length;
+}
 
 /**
  * Analyze closed position performance and evolve screening thresholds.

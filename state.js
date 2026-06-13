@@ -200,6 +200,25 @@ export function recordClose(position_address, reason) {
 }
 
 /**
+ * Record a rebalance (close + redeploy).
+ */
+export function recordRebalance(old_position, new_position) {
+  const state = load();
+  const old = state.positions[old_position];
+  if (old) {
+    old.closed = true;
+    old.closed_at = new Date().toISOString();
+    old.notes.push(`Rebalanced into ${new_position} at ${old.closed_at}`);
+  }
+  const newPos = state.positions[new_position];
+  if (newPos) {
+    newPos.rebalance_count = (old?.rebalance_count || 0) + 1;
+    newPos.notes.push(`Rebalanced from ${old_position}`);
+  }
+  save(state);
+}
+
+/**
  * Set a persistent instruction for a position (e.g. "hold until 5% profit").
  * Overwrites any previous instruction. Pass null to clear.
  */

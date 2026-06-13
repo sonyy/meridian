@@ -23,7 +23,8 @@ export function normalizeIntervals(intervals) {
 }
 
 function safeNum(value) {
-  return safeNumber(value, null);
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
 }
 
 function buildSignalSummary(payload) {

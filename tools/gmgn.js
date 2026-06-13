@@ -42,12 +42,78 @@ export async function getGmgnTokenFees(mint) {
     const info = payload?.data?.data || payload?.data || payload;
     if (!info || typeof info !== "object") return null;
     return {
-      total_fee: num(info.total_fee),
-      trade_fee: num(info.trade_fee),
+      total_fee: num(info.total_fee, null),
+      trade_fee: num(info.trade_fee, null),
     };
   } catch (error) {
     log("gmgn", `token fees lookup failed for ${String(mint).slice(0, 8)}: ${error.message}`);
     return null;
+  }
+}
+
+function normalizeInterval(value, fallback = "5m") {
+  const normalized = String(value || fallback).trim();
+  return SUPPORTED_INTERVALS.has(normalized) ? normalized : fallback;
+}
+
+function boolish(value) {
+  return value === true || value === 1 || value === "1" || String(value).toLowerCase() === "true" || String(value).toLowerCase() === "yes";
+}
+
+function ratioPct(value) {
+  const n = optionalNum(value);
+  if (n == null) return null;
+  return Number((n * 100).toFixed(2));
+}
+
+function hasTag(entry, tag) {
+  const tags = []
+    .concat(entry?.tags || [])
+    .concat(entry?.maker_token_tags || [])
+    .map((value) => String(value || "").toLowerCase());
+  return tags.includes(tag);
+}
+
+function entryName(entry) {
+  return String(entry?.name || entry?.twitter_username || entry?.username || entry?.label || entry?.address || entry || "").trim();
+}
+
+function entryAmountPct(entry) {
+  const raw = entry?.amount_percentage ?? entry?.balance_percentage ?? entry?.amount_cur_percentage;
+  const n = optionalNum(raw);
+  if (n == null) return 0;
+  return n > 1 ? n : n * 100;
+}
+
+function isPreferredKol(entry) {
+  const preferred = config.gmgn.preferredKolNames
+    .map((name) => String(name || "").trim().toLowerCase())
+    .filter(Boolean);
+  if (!preferred.length) return false;
+  const normalized = entryName(entry).toLowerCase();
+  return preferred.some((preferredName) => normalized.includes(preferredName));
+}
+
+function isDumpKol(entry) {
+  const dump = (config.gmgn.dumpKolNames || [])
+    .map((name) => String(name || "").trim().toLowerCase())
+    .filter(Boolean);
+  if (!dump.length) return false;
+  const normalized = entryName(entry).toLowerCase();
+  return dump.some((dumpName) => normalized.includes(dumpName));
+}
+
+function passBasicRankFilter(token) {
+  const g = config.gmgn;
+  const reasons = [];
+  const tokenAgeHours = num(token.creation_timestamp) > 0
+    ? (Date.now() / 1000 - num(token.creation_timestamp)) / 3600
+    : null;
+  if (num(token.market_cap) < g.minMcap) reasons.push(`mcap ${num(token.market_cap)} < ${g.minMcap}`);
+  if (g.maxMcap != null && num(token.market_cap) > g.maxMcap) reasons.push(`mcap ${num(token.market_cap)} > ${g.maxMcap}`);
+  if (num(token.bundler_rate) > g.maxBundlerRate) reasons.push(`bundler ${(num(token.bundler_rate) * 100).toFixed(1)}% > ${(g.maxBundlerRate * 100).toFixed(1)}%`);
+  if (g.minTokenAgeHours != null && tokenAgeHours != null && tokenAgeHours < g.minTokenAgeHours) {
+    reasons.push(`age ${tokenAgeHours.toFixed(2)}h < ${g.minTokenAgeHours}h`);
   }
   if (g.maxTokenAgeHours != null && tokenAgeHours != null && tokenAgeHours > g.maxTokenAgeHours) {
     reasons.push(`age ${tokenAgeHours.toFixed(2)}h > ${g.maxTokenAgeHours}h`);

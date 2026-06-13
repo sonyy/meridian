@@ -15,9 +15,8 @@ function load() {
   if (!fs.existsSync(BLACKLIST_FILE)) return {};
   try {
     return JSON.parse(fs.readFileSync(BLACKLIST_FILE, "utf8"));
-  } catch (error) {
-    log("blacklist_error", `Invalid ${BLACKLIST_FILE}: ${error.message}`);
-    throw new Error(`Safety blacklist is unreadable: ${BLACKLIST_FILE}`);
+  } catch {
+    return {};
   }
 }
 

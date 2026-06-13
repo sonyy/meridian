@@ -27,7 +27,6 @@ import { recordPerformance } from "../lessons.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
-import { agentMeridianJson, getAgentIdForRequests, getAgentMeridianHeaders } from "./agent-meridian.js";
 import { getAndClearStagedSignals } from "../signal-tracker.js";
 import { computePositions, fetchDlmmPnlForPool } from "./pnl.js";
 
@@ -98,13 +97,113 @@ function getWallet() {
   return _wallet;
 }
 
+function getMeridianApiBase() {
+  return String(config.api.url || "https://api.agentmeridian.xyz/api").replace(/\/+$/, "");
+}
+
+function getMeridianHeaders() {
+  const headers = { "Content-Type": "application/json" };
+  if (config.api.publicApiKey) {
+    headers["x-api-key"] = config.api.publicApiKey;
+  }
+  return headers;
+}
+
 function shouldUseLpAgentRelay() {
   return !!config.api.lpAgentRelayEnabled;
 }
 
 function shouldUseLpAgentRelayForDeploy() {
-  // Zap-in relay is intentionally disabled; deploys use the local Meteora SDK path.
   return false;
+}
+
+async function meridianJson(pathname, options = {}) {
+  const { retry, ...fetchOptions } = options;
+  if (!retry) {
+    return meridianJsonOnce(pathname, fetchOptions);
+  }
+  const maxElapsedMs = Number(retry.maxElapsedMs || 30_000);
+  const maxAttempts = Number(retry.maxAttempts || 10);
+  const startedAt = Date.now();
+  let attempt = 0;
+  let lastError = null;
+  while (Date.now() - startedAt < maxElapsedMs && attempt < maxAttempts) {
+    const elapsedMs = Date.now() - startedAt;
+    const remainingMs = Math.max(1, maxElapsedMs - elapsedMs);
+    try {
+      return await meridianJsonOnce(
+        pathname,
+        fetchOptions,
+        Math.min(Number(retry.perAttemptTimeoutMs || 10_000), remainingMs),
+      );
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableMeridianError(error) || attempt >= maxAttempts - 1) throw error;
+      const waitMs = Math.min(meridianRetryDelayMs(error, attempt), Math.max(0, remainingMs - 1));
+      if (waitMs <= 0) break;
+      await sleep(waitMs);
+      attempt += 1;
+    }
+  }
+  throw lastError || new Error(`${pathname} retry budget exhausted`);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableMeridianStatus(status) {
+  return status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
+}
+
+function isRetryableMeridianError(error) {
+  if (isRetryableMeridianStatus(Number(error?.status || 0))) return true;
+  const name = String(error?.name || "");
+  const message = String(error?.message || "").toLowerCase();
+  return name === "AbortError" || message.includes("aborted") || message.includes("fetch failed") || message.includes("network");
+}
+
+function meridianRetryDelayMs(error, attempt) {
+  const retryAfter = Number(error?.retryAfter);
+  if (Number.isFinite(retryAfter) && retryAfter > 0) return Math.min(retryAfter * 1000, 10_000);
+  return Math.min(500 * 2 ** attempt, 5_000);
+}
+
+async function meridianFetchWithTimeout(url, options, timeoutMs) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return fetch(url, options);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const signal = options.signal;
+  const abortFromParent = () => controller.abort();
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener("abort", abortFromParent, { once: true });
+  }
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+    if (signal) signal.removeEventListener("abort", abortFromParent);
+  }
+}
+
+async function meridianJsonOnce(pathname, options = {}, timeoutMs = null) {
+  const res = await meridianFetchWithTimeout(`${getMeridianApiBase()}${pathname}`, options, timeoutMs);
+  const text = await res.text().catch(() => "");
+  let payload = {};
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch {
+    payload = { raw: text };
+  }
+  if (!res.ok) {
+    const error = new Error(payload?.error || `${pathname} ${res.status}`);
+    error.status = res.status;
+    error.payload = payload;
+    error.retryAfter = res.headers.get("retry-after");
+    throw error;
+  }
+  return payload;
 }
 
 function signSerializedTransaction(serialized, wallet) {
@@ -146,8 +245,7 @@ function getTransactionInstructions(tx) {
     .map((ix) => {
       const programId = keys[ix.programIdIndex];
       if (!programId) return null;
-      const indexes = ix.accountKeyIndexes || ix.accounts || [];
-      const accounts = indexes
+      const accounts = ix.accountKeyIndexes
         .map((accountIndex) => keys[accountIndex])
         .filter(Boolean);
       return new TransactionInstruction({
@@ -520,17 +618,6 @@ export async function deployPosition({
     activeBinsAbove = Math.max(0, upperBinId - activeBin.binId);
   }
 
-  const strategyMap = {
-    spot: StrategyType.Spot,
-    curve: StrategyType.Curve,
-    bid_ask: StrategyType.BidAsk,
-  };
-
-  const strategyType = strategyMap[activeStrategy];
-  if (strategyType === undefined) {
-    throw new Error(`Invalid strategy: ${activeStrategy}. Use spot, curve, or bid_ask.`);
-  }
-
   // Calculate amounts
   // If no explicit SOL amount is provided, fall back to the configured dynamic deploy size.
   const fallbackAmountY =
@@ -553,6 +640,17 @@ export async function deployPosition({
     throw new Error(
       "Single-side SOL deploy cannot use bins_above or upside_pct. Use amount_y with bins_below only; the upper bin is the SDK active bin.",
     );
+  }
+
+  const strategyMap = {
+    spot: StrategyType.Spot,
+    curve: StrategyType.Curve,
+    bid_ask: StrategyType.BidAsk,
+  };
+
+  const strategyType = strategyMap[activeStrategy];
+  if (strategyType === undefined) {
+    throw new Error(`Invalid strategy: ${activeStrategy}. Use spot, curve, or bid_ask.`);
   }
   if (isSingleSidedSol) {
     activeBinsAbove = 0;
@@ -635,11 +733,11 @@ export async function deployPosition({
         "deploy",
         `Relay deploy via Agent Meridian: ${pool_address} activeBin ${activeBin.binId} bins ${minBinId}->${maxBinId} amountY=${finalAmountY}`,
       );
-      const order = await agentMeridianJson("/execution/zap-in/order", {
+      const order = await meridianJson("/execution/zap-in/order", {
         method: "POST",
-        headers: getAgentMeridianHeaders({ json: true }),
+        headers: getMeridianHeaders(),
         body: JSON.stringify({
-          agentId: getAgentIdForRequests(),
+          agentId: config.hiveMind.agentId || "agent-local",
           idempotencyKey: `deploy:${pool_address}:${minBinId}:${maxBinId}:${finalAmountY}:${finalAmountX}`,
           poolId: pool_address,
           owner: wallet.publicKey.toString(),
@@ -664,9 +762,9 @@ export async function deployPosition({
 
       const addLiquidity = signSerializedTransactions(addLiquidityUnsigned, wallet);
       const swap = signSerializedTransactions(swapUnsigned, wallet);
-      const submit = await agentMeridianJson("/execution/zap-in/submit", {
+      const submit = await meridianJson("/execution/zap-in/submit", {
         method: "POST",
-        headers: getAgentMeridianHeaders({ json: true }),
+        headers: getMeridianHeaders(),
         body: JSON.stringify({
           requestId: order.requestId,
           lastValidBlockHeight: order?.order?.lastValidBlockHeight,
@@ -1115,8 +1213,8 @@ async function fetchRawOpenPositionsFromMeridian({ walletAddress, agentId }) {
     owner: walletAddress,
     agentId: agentId || "agent-local",
   });
-  const payload = await agentMeridianJson(`/positions/open/raw?${search.toString()}`, {
-    headers: getAgentMeridianHeaders(),
+  const payload = await meridianJson(`/positions/open/raw?${search.toString()}`, {
+    headers: getMeridianHeaders(),
     retry: {
       maxElapsedMs: 30_000,
       perAttemptTimeoutMs: 10_000,
@@ -1511,11 +1609,11 @@ export async function closePosition({ position_address, reason }) {
       const closeToBinId = livePosition?.upper_bin ?? tracked?.bin_range?.max ?? 887272;
       const closeOutput = "allToken1";
 
-      const order = await agentMeridianJson("/execution/zap-out/order", {
+      const order = await meridianJson("/execution/zap-out/order", {
         method: "POST",
-        headers: getAgentMeridianHeaders({ json: true }),
+        headers: getMeridianHeaders(),
         body: JSON.stringify({
-          agentId: getAgentIdForRequests(),
+          agentId: config.hiveMind.agentId || "agent-local",
           idempotencyKey: `close:${position_address}:10000`,
           positionId: position_address,
           owner: wallet.publicKey.toString(),
@@ -1549,9 +1647,9 @@ export async function closePosition({ position_address, reason }) {
       });
 
       relaySubmitted = true;
-      const submit = await agentMeridianJson("/execution/zap-out/submit", {
+      const submit = await meridianJson("/execution/zap-out/submit", {
         method: "POST",
-        headers: getAgentMeridianHeaders({ json: true }),
+        headers: getMeridianHeaders(),
         body: JSON.stringify({
           requestId: order.requestId,
           lastValidBlockHeight: order?.order?.lastValidBlockHeight,

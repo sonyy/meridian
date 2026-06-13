@@ -9,12 +9,7 @@ node_modules/
 
 # User config (contains RPC URL, wallet key, API keys)
 user-config.json
-
-# GMGN fee-source config (contains API key)
 gmgn-config.json
-
-# Stray Claude Code worktrees
-.claude/worktrees/
 
 # Runtime state (position tracking, lessons — user-specific)
 state.json
@@ -26,6 +21,7 @@ strategy-library.json
 decision-log.json
 hivemind-cache.json
 signal-weights.json
+paper-positions.json
 
 # Logs
 logs/
@@ -35,15 +31,7 @@ logs/
 
 # Dev context
 context.md
-CONTEXT.md
-dev-blocklist.json
 docs/
 
-# Discord listener queue
-discord-signals.json
-
-# Playwright MCP browser logs
-.playwright-mcp/
-
-# Claude Code runtime lock
-.claude/scheduled_tasks.lock
+# Test files
+test-*.js

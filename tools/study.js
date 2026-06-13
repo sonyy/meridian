@@ -1,13 +1,32 @@
-import { agentMeridianJson, getAgentMeridianHeaders } from "./agent-meridian.js";
+import { config } from "../config.js";
+
+const AGENT_MERIDIAN_API = config.api.url;
+const AGENT_MERIDIAN_PUBLIC_KEY =
+  config.api.publicApiKey || process.env.PUBLIC_API_KEY || "bWVyaWRpYW4taXMtdGhlLWJlc3QtYWdlbnRz";
 
 export async function studyTopLPers({ pool_address, limit = 4 }) {
+  const headers = { "x-api-key": AGENT_MERIDIAN_PUBLIC_KEY };
   const [poolRes, signalRes] = await Promise.all([
-    fetchTopLp(pool_address),
-    fetchStudyTopLp(pool_address),
+    fetch(`${AGENT_MERIDIAN_API}/top-lp/${pool_address}`, { headers }),
+    fetch(`${AGENT_MERIDIAN_API}/study-top-lp/${pool_address}`, { headers }),
   ]);
 
-  const poolData = poolRes;
-  const signalData = signalRes;
+  if (!poolRes.ok) {
+    if (poolRes.status === 429) {
+      throw new Error("Rate limit exceeded. Please wait 60 seconds before studying this pool again.");
+    }
+    throw new Error(`top-lp API error: ${poolRes.status}`);
+  }
+
+  if (!signalRes.ok) {
+    if (signalRes.status === 429) {
+      throw new Error("Rate limit exceeded. Please wait 60 seconds before studying this pool again.");
+    }
+    throw new Error(`study-top-lp API error: ${signalRes.status}`);
+  }
+
+  const poolData = await poolRes.json();
+  const signalData = await signalRes.json();
   const topLpers = Array.isArray(poolData.topLpers) ? poolData.topLpers : [];
   const historicalOwners = Array.isArray(poolData.historicalOwners) ? poolData.historicalOwners : [];
   const ranked = topLpers.slice(0, Math.max(1, limit));
@@ -81,18 +100,6 @@ export async function studyTopLPers({ pool_address, limit = 4 }) {
     patterns,
     lpers,
   };
-}
-
-function fetchTopLp(poolAddress) {
-  return agentMeridianJson(`/top-lp/${poolAddress}`, {
-    headers: getAgentMeridianHeaders(),
-  });
-}
-
-function fetchStudyTopLp(poolAddress) {
-  return agentMeridianJson(`/study-top-lp/${poolAddress}`, {
-    headers: getAgentMeridianHeaders(),
-  });
 }
 
 function buildPatterns(ranked, historicalOwners, signalData, overview) {

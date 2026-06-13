@@ -1,8 +1,12 @@
 /**
- * signal-tracker.js — Stages screening signals for later attribution.
+ * signal-tracker.js — Captures screening signals at deploy time for Darwinian weighting.
  *
- * Deploy-time persistence is not currently wired, so staged signals are
- * short-lived context rather than durable performance data.
+ * During screening, signals are "staged" for each candidate pool.
+ * When deploy_position fires, the staged signals are retrieved and stored
+ * in state.json alongside the position, so we know exactly what signals
+ * were present when the decision was made.
+ *
+ * This enables post-hoc analysis: which signals actually predicted wins?
  */
 
 import { log } from "./logger.js";

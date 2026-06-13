@@ -1,18 +1,6 @@
 import { config } from "../config.js";
-import { getGmgnTokenFees, hasGmgnApiKey } from "./gmgn.js";
 
 const DATAPI_BASE = "https://datapi.jup.ag/v1";
-
-// Resolve the global_fees_sol gate value. GMGN's /v1/token/info total_fee is the
-// accurate all-time fee figure; Jupiter's `fees` is slightly off and misleading.
-// Falls back to the Jupiter value when GMGN is disabled / keyless / errors.
-async function resolveGlobalFeesSol(mint, jupiterFees) {
-  const jup = jupiterFees != null ? parseFloat(jupiterFees.toFixed(2)) : null;
-  if (!mint || config.gmgn?.feeSource !== "gmgn" || !hasGmgnApiKey()) return jup;
-  const fees = await getGmgnTokenFees(mint);
-  if (fees?.total_fee != null) return parseFloat(fees.total_fee.toFixed(2));
-  return jup;
-}
 
 /**
  * Get the narrative/story behind a token from Jupiter ChainInsight.
@@ -64,7 +52,7 @@ export async function getTokenInfo({ query }) {
     organic_label: t.organicScoreLabel,
     launchpad: t.launchpad,
     graduated: !!t.graduatedPool,
-    global_fees_sol: t.fees != null ? parseFloat(t.fees.toFixed(2)) : null, // refined to GMGN below
+    global_fees_sol: t.fees != null ? parseFloat(t.fees.toFixed(2)) : null,
 
     audit: t.audit ? {
       mint_disabled: t.audit.mintAuthorityDisabled,
@@ -189,7 +177,7 @@ export async function getTokenHolders({ mint, limit = 20 }) {
 
   return {
     mint,
-    global_fees_sol: await resolveGlobalFeesSol(mint, tokenInfo?.fees),
+    global_fees_sol: tokenInfo?.fees != null ? parseFloat(tokenInfo.fees.toFixed(2)) : null,
     total_fetched: holders.length,
     showing: mapped.length,
     top_10_real_holders_pct: top10Pct.toFixed(2),
