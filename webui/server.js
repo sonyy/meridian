@@ -318,6 +318,23 @@ app.get("/api/positions", async (req, res) => {
   }
 });
 
+// ── Bin weight recomputation (stored weights may be stale from older code) ──
+function rebuildWeights(strategy, lowerBinId, upperBinId) {
+  if (strategy !== "bid-ask" && strategy !== "curve") return null; // spot = uniform
+  const n = upperBinId - lowerBinId + 1;
+  if (n <= 0 || n > 500) return null;
+  const center = Math.floor(n / 2);
+  const sigma = Math.max(n / 4, 1);
+  const w = Array.from({ length: n }, (_, i) => {
+    const d = i - center;
+    if (strategy === "curve")   return Math.exp(-0.5 * (d / sigma) ** 2);
+    if (strategy === "bid-ask") return 1 - Math.exp(-0.5 * (d / sigma) ** 2) + 0.01;
+    return 1;
+  });
+  const total = w.reduce((s, v) => s + v, 0);
+  return w.map((v) => v / total);
+}
+
 function enrich(paperPos, trackedMap, status) {
   const t = trackedMap[paperPos.id];
   const outSince = t?.out_of_range_since
@@ -366,9 +383,16 @@ function enrich(paperPos, trackedMap, status) {
       }
       return null;
     })(),
-    // bin distribution for chart overlay
-    bin_volumes: paperPos.weights && paperPos.deposit > 0
-      ? paperPos.weights.map(w => +(paperPos.deposit * w).toFixed(6))
+    // bin distribution for chart overlay — recompute weights from strategy+bin_ids
+    bin_volumes: paperPos.deposit > 0 && paperPos.lower_bin_id != null && paperPos.upper_bin_id != null
+      ? (() => {
+          const w = paperPos.strategy === "bid-ask" || paperPos.strategy === "curve"
+            ? rebuildWeights(paperPos.strategy, paperPos.lower_bin_id, paperPos.upper_bin_id)
+            : null;
+          const weights = w ?? (paperPos.weights?.length > 0 ? paperPos.weights : null);
+          if (!weights) return null;
+          return weights.map(w => +(paperPos.deposit * w).toFixed(6));
+        })()
       : null,
     bin_step: paperPos.bin_step ?? null,
     lower_bin_id: paperPos.lower_bin_id ?? null,

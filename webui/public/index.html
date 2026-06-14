@@ -274,10 +274,10 @@ Chart.register({
           const yPos = yScale.getPixelForValue(b.price);
           if (!Number.isFinite(yPos)) continue;
           if (yPos < chartArea.top - 2 || yPos > chartArea.bottom + 2) continue;
-          const barW = Math.max(2, (b.volume / maxVol) * barMaxWidth);
-          const alpha = Math.max(0.12, Math.min(0.45, (b.volume / maxVol) * 0.3 + 0.12));
+          const barW = Math.max(1, (b.volume / maxVol) * barMaxWidth);
+          const alpha = Math.max(0.04, Math.min(0.18, (b.volume / maxVol) * 0.14 + 0.04));
           ctx.fillStyle = `rgba(251,191,36,${alpha})`;
-          ctx.fillRect(chartArea.right - barW, yPos - 1, barW, 2);
+          ctx.fillRect(chartArea.right - barW, yPos - 0.5, barW, 1);
         }
         ctx.restore();
       }
