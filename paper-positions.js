@@ -435,5 +435,10 @@ function formatSummary(pos) {
     candles_total: pos.candles_total,
     annualized_fee_apr: annualizedApr,
     close_reason:  pos.close_reason ?? null,
+    // bin distribution for chart overlay
+    bin_step:      pos.bin_step ?? null,
+    lower_bin_id:  pos.lower_bin_id ?? null,
+    upper_bin_id:  pos.upper_bin_id ?? null,
+    weights:       pos.weights ?? null,
   };
 }

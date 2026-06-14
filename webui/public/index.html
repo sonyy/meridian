@@ -259,12 +259,33 @@ Chart.register({
   id: 'priceMarkers',
   afterDraw(chart) {
     try {
+      const ctx = chart.ctx;
+      const chartArea = chart.chartArea;
+      const yScale = chart.scales.y;
+      if (!yScale || !chartArea) return;
+
+      // 1. Draw bin volume bars (before markers so they appear beneath)
+      const binData = chart.options._binData;
+      if (binData && binData.length > 0) {
+        const maxVol = binData.reduce((m, b) => Math.max(m, b.volume), 0) || 1;
+        ctx.save();
+        for (const b of binData) {
+          const yPos = yScale.getPixelForValue(b.price);
+          if (!Number.isFinite(yPos)) continue;
+          if (yPos < chartArea.top - 2 || yPos > chartArea.bottom + 2) continue;
+          // Height proportional to volume, at least 1px, max 14px
+          const barH = Math.max(1, Math.min(14, (b.volume / maxVol) * 14));
+          const alpha = Math.max(0.08, Math.min(0.3, (b.volume / maxVol) * 0.25 + 0.08));
+          ctx.fillStyle = `rgba(251,191,36,${alpha})`;
+          ctx.fillRect(chartArea.left, yPos - barH / 2, chartArea.right - chartArea.left, barH);
+        }
+        ctx.restore();
+      }
+
+      // 2. Draw price markers
       const markers = chart.options._markerPrices;
       if (!markers || !markers.length) return;
-      const yScale = chart.scales.y;
-      if (!yScale || !chart.chartArea) return;
-      const ctx = chart.ctx;
-      const xLeft = Math.max(4, chart.chartArea.left + 4);
+      const xLeft = Math.max(4, chartArea.left + 4);
       ctx.save();
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
@@ -272,7 +293,7 @@ Chart.register({
       for (const m of markers) {
         const yPos = yScale.getPixelForValue(m.price);
         if (!Number.isFinite(yPos)) continue;
-        if (yPos < chart.chartArea.top - 2 || yPos > chart.chartArea.bottom + 2) continue;
+        if (yPos < chartArea.top - 2 || yPos > chartArea.bottom + 2) continue;
         const text = String(m.label);
         const w = ctx.measureText(text).width + 5;
         ctx.fillStyle = 'rgba(10,14,23,0.82)';
@@ -564,6 +585,17 @@ function drawChart(p, i, c) {
       { price: lower, label: lower.toExponential(3), color: '#f59e0b' },
     ];
 
+    // Pre-compute bin volume bars (geometric interpolation between lower and upper)
+    let binData = null;
+    if (p.bin_volumes && p.bin_volumes.length > 1 && p.range_lower > 0 && p.range_upper > 0) {
+      const n = p.bin_volumes.length;
+      const ratio = Math.pow(p.range_upper / p.range_lower, 1 / (n - 1));
+      binData = p.bin_volumes.map((vol, i) => ({
+        price: p.range_lower * Math.pow(ratio, i),
+        volume: vol,
+      }));
+    }
+
     // Update existing chart data in-place OR create new chart
     let ch = charts.get(p.id);
     if (ch && ch.canvas === canvas) {
@@ -576,6 +608,7 @@ function drawChart(p, i, c) {
       ch.options.scales.y.min = yMin;
       ch.options.scales.y.max = yMax;
       ch.options._markerPrices = markerPrices;
+      ch.options._binData = binData;
       ch.update('none');
     } else {
       // Canvas changed or new position — destroy stale instance, create fresh
@@ -595,6 +628,7 @@ function drawChart(p, i, c) {
           responsive: true, maintainAspectRatio: false, animation: false,
           plugins: { legend: { display: false }, tooltip: { enabled: false } },
           _markerPrices: markerPrices,
+          _binData: binData,
           scales: {
             x: {
               display: true,

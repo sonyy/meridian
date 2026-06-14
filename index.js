@@ -26,7 +26,7 @@ import {
   createLiveMessage,
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
-import { tickPaperPositions } from "./paper-positions.js";
+import { tickPaperPositions, listPaperPositions } from "./paper-positions.js";
 import { isVirtualMode, getVirtualStatus, tickVirtualPositions, getVirtualPositionsAsReal, getVirtualWallet, virtualDeployPosition } from "./virtual-engine.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
@@ -124,15 +124,74 @@ function shouldUsePnlRecheck() {
   return !config.api.lpAgentRelayEnabled;
 }
 
+// ─── Adaptive paper tick scheduler ────────────────────────────────────────
+let _paperTickTimeout = null;
+let _lastPaperTickTime = 0;
+const PAPER_TICK_BASE_MS  = 60_000;   // minimum check interval (1 min)
+const PAPER_TICK_IDLE_MS  = 300_000;  // 5 min when no open positions
+const PAPER_TICK_FAST_MS  = 60_000;   // 1 min when near SL/TP
+const PAPER_TICK_NORMAL_MS = 120_000; // 2 min normal tick
+const PAPER_TICK_STALL_MS = 360_000;  // 6 min stall threshold → force tick
+
+function paperTickIntervalMs() {
+  const openPositions = listPaperPositions().filter((p) => p.status === "open");
+  if (openPositions.length === 0) return PAPER_TICK_IDLE_MS;
+
+  for (const p of openPositions) {
+    const netPnlPct = p.deposit > 0 ? (p.net_pnl / p.deposit) * 100 : 0;
+    const sl = config.management?.stopLossPct;
+    const tp = config.management?.takeProfitPct;
+    if (sl != null && netPnlPct <= sl + 3) return PAPER_TICK_FAST_MS;
+    if (tp != null && netPnlPct >= tp - 3) return PAPER_TICK_FAST_MS;
+  }
+
+  return PAPER_TICK_NORMAL_MS;
+}
+
+function schedulePaperTick() {
+  if (_paperTickTimeout) clearTimeout(_paperTickTimeout);
+
+  const doTick = async () => {
+    const now = Date.now();
+    const sinceLast = now - _lastPaperTickTime;
+    const targetMs = paperTickIntervalMs();
+
+    if (sinceLast > PAPER_TICK_STALL_MS) {
+      log("paper_sim", `Tick stall detected (${Math.round(sinceLast / 1000)}s since last), forcing immediate tick`);
+    }
+
+    _lastPaperTickTime = Date.now();
+    await tickPaperPositions().catch((e) => log("cron_error", `Paper sim tick failed: ${e.message}`));
+    schedulePaperTick();
+  };
+
+  _paperTickTimeout = setTimeout(doTick, Math.max(PAPER_TICK_BASE_MS, paperTickIntervalMs()));
+}
+
+function stopPaperTick() {
+  if (_paperTickTimeout) {
+    clearTimeout(_paperTickTimeout);
+    _paperTickTimeout = null;
+  }
+}
+
 function schedulePeakConfirmation(positionAddress) {
   if (!positionAddress || _peakConfirmTimers.has(positionAddress)) return;
 
   const timer = setTimeout(async () => {
     _peakConfirmTimers.delete(positionAddress);
     try {
-      const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
-      const position = result?.positions?.find((p) => p.position === positionAddress);
-      resolvePendingPeak(positionAddress, position?.pnl_pct ?? null, TRAILING_PEAK_CONFIRM_TOLERANCE);
+      let pnlPct = null;
+      if (isVirtualMode()) {
+        const virtuals = getVirtualPositionsAsReal();
+        const found = virtuals.find((p) => p.position === positionAddress);
+        pnlPct = found?.pnl_pct ?? null;
+      } else {
+        const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
+        const position = result?.positions?.find((p) => p.position === positionAddress);
+        pnlPct = position?.pnl_pct ?? null;
+      }
+      resolvePendingPeak(positionAddress, pnlPct, TRAILING_PEAK_CONFIRM_TOLERANCE);
     } catch (error) {
       log("state_warn", `Peak confirmation failed for ${positionAddress}: ${error.message}`);
     }
@@ -147,11 +206,19 @@ function scheduleTrailingDropConfirmation(positionAddress) {
   const timer = setTimeout(async () => {
     _trailingDropConfirmTimers.delete(positionAddress);
     try {
-      const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
-      const position = result?.positions?.find((p) => p.position === positionAddress);
+      let pnlPct = null;
+      if (isVirtualMode()) {
+        const virtuals = getVirtualPositionsAsReal();
+        const found = virtuals.find((p) => p.position === positionAddress);
+        pnlPct = found?.pnl_pct ?? null;
+      } else {
+        const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
+        const position = result?.positions?.find((p) => p.position === positionAddress);
+        pnlPct = position?.pnl_pct ?? null;
+      }
       const resolved = resolvePendingTrailingDrop(
         positionAddress,
-        position?.pnl_pct ?? null,
+        pnlPct,
         config.management.trailingDropPct,
         TRAILING_DROP_CONFIRM_TOLERANCE_PCT,
       );
@@ -202,6 +269,7 @@ async function maybeRunMissedBriefing() {
 function stopCronJobs() {
   for (const task of _cronTasks) task.stop();
   if (_cronTasks._pnlPollInterval) clearInterval(_cronTasks._pnlPollInterval);
+  stopPaperTick();
   _cronTasks = [];
 }
 
@@ -933,10 +1001,9 @@ Summarize the current portfolio health, total fees earned, and performance of al
     }
   });
 
-  // Paper position tick — every 5m regardless of management interval
-  const paperSimTask = cron.schedule(`*/5 * * * *`, async () => {
-    tickPaperPositions().catch((e) => log("cron_error", `Paper sim tick failed: ${e.message}`));
-  });
+  // Paper position tick — adaptive scheduler (speeds up when near SL/TP)
+  schedulePaperTick();
+  _lastPaperTickTime = Date.now();
 
   // Morning Briefing at 8:00 AM UTC+7 (1:00 AM UTC)
   const briefingTask = cron.schedule(`0 1 * * *`, async () => {
@@ -955,9 +1022,15 @@ Summarize the current portfolio health, total fees earned, and performance of al
     if (getTrackedPositions(true).length === 0) return;
     _pnlPollBusy = true;
     try {
-      const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
-      if (!result?.positions?.length) return;
-      for (const p of result.positions) {
+      let pollPositions = [];
+      if (isVirtualMode()) {
+        pollPositions = getVirtualPositionsAsReal();
+      } else {
+        const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
+        pollPositions = result?.positions ?? [];
+      }
+      if (!pollPositions.length) return;
+      for (const p of pollPositions) {
         if (
           !p.pnl_pct_suspicious &&
           queuePeakConfirmation(p.position, p.pnl_pct, { immediate: !shouldUsePnlRecheck() }) &&
@@ -1005,7 +1078,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
     }
   }, 30_000);
 
-  _cronTasks = [mgmtTask, screenTask, healthTask, paperSimTask, briefingTask, briefingWatchdog];
+  _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog];
   // Store interval ref so stopCronJobs can clear it
   _cronTasks._pnlPollInterval = pnlPollInterval;
   log("cron", `Cycles started — management every ${config.schedule.managementIntervalMin}m, screening every ${config.schedule.screeningIntervalMin}m`);
@@ -1098,17 +1171,14 @@ function getDeterministicCloseRule(position, managementConfig) {
     return { action: "CLOSE", rule: 2, reason: "take profit" };
   }
   if (
-    position.active_bin != null &&
-    position.upper_bin != null &&
-    position.active_bin > position.upper_bin + managementConfig.outOfRangeBinsToClose
+    (position.active_bin != null && position.upper_bin != null && position.active_bin > position.upper_bin + managementConfig.outOfRangeBinsToClose) ||
+    (position._is_virtual && position.in_range === false && position.upper_price != null && position.last_price != null && position.last_price > position.upper_price * 1.5)
   ) {
     return { action: "CLOSE", rule: 3, reason: "pumped far above range" };
   }
   if (
-    position.active_bin != null &&
-    position.upper_bin != null &&
-    position.active_bin > position.upper_bin &&
-    (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangeWaitMinutes
+    (position.active_bin != null && position.upper_bin != null && position.active_bin > position.upper_bin && (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangeWaitMinutes) ||
+    (position._is_virtual && position.in_range === false && (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangeWaitMinutes)
   ) {
     return { action: "CLOSE", rule: 4, reason: "OOR" };
   }

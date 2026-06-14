@@ -366,6 +366,13 @@ function enrich(paperPos, trackedMap, status) {
       }
       return null;
     })(),
+    // bin distribution for chart overlay
+    bin_volumes: paperPos.weights && paperPos.deposit > 0
+      ? paperPos.weights.map(w => +(paperPos.deposit * w).toFixed(6))
+      : null,
+    bin_step: paperPos.bin_step ?? null,
+    lower_bin_id: paperPos.lower_bin_id ?? null,
+    upper_bin_id: paperPos.upper_bin_id ?? null,
   };
 }
 
