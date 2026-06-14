@@ -264,20 +264,20 @@ Chart.register({
       const yScale = chart.scales.y;
       if (!yScale || !chartArea) return;
 
-      // 1. Draw bin volume bars (before markers so they appear beneath)
+      // 1. Draw bin volume profile on the right margin
       const binData = chart.options._binData;
       if (binData && binData.length > 0) {
         const maxVol = binData.reduce((m, b) => Math.max(m, b.volume), 0) || 1;
+        const barMaxWidth = Math.max(20, (chartArea.right - chartArea.left) * 0.15);
         ctx.save();
         for (const b of binData) {
           const yPos = yScale.getPixelForValue(b.price);
           if (!Number.isFinite(yPos)) continue;
           if (yPos < chartArea.top - 2 || yPos > chartArea.bottom + 2) continue;
-          // Height proportional to volume, at least 1px, max 14px
-          const barH = Math.max(1, Math.min(14, (b.volume / maxVol) * 14));
-          const alpha = Math.max(0.08, Math.min(0.3, (b.volume / maxVol) * 0.25 + 0.08));
+          const barW = Math.max(2, (b.volume / maxVol) * barMaxWidth);
+          const alpha = Math.max(0.12, Math.min(0.45, (b.volume / maxVol) * 0.3 + 0.12));
           ctx.fillStyle = `rgba(251,191,36,${alpha})`;
-          ctx.fillRect(chartArea.left, yPos - barH / 2, chartArea.right - chartArea.left, barH);
+          ctx.fillRect(chartArea.right - barW, yPos - 1, barW, 2);
         }
         ctx.restore();
       }
