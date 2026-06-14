@@ -290,12 +290,24 @@ Chart.register({
 });
 
 function fetchData() {
-  fetch('/api/positions')
+  fetch('/api/positions', { cache: 'no-store' })
     .then(r => r.json())
-    .then(d => render(d))
+    .then(d => {
+      document.getElementById('refreshError')?.remove();
+      render(d);
+    })
     .catch(e => {
-      document.getElementById('openPositions').innerHTML =
-        `<div class="no-data">⚠ error loading data: ${e.message}</div>`;
+      // Don't wipe data — just show a subtle error badge
+      let err = document.getElementById('refreshError');
+      if (!err) {
+        err = document.createElement('span');
+        err.id = 'refreshError';
+        err.style.cssText = 'margin-left:8px;font-size:11px;color:var(--red)';
+        document.getElementById('refreshTime').after(err);
+      }
+      err.textContent = `⚠ ${e.message}`;
+      // auto-retry after 2s
+      setTimeout(fetchData, 2000);
     });
 }
 
@@ -389,7 +401,7 @@ function render(d) {
   }
 
   // closed trades (no charts, innerHTML fine)
-  const closedList = d.closed || [];
+  const closedList = (d.closed || []).sort((a, b) => new Date(b.closed_at) - new Date(a.closed_at));
   document.getElementById('closedCount').textContent = closedList.length;
 
   if (closedList.length === 0) {
@@ -742,7 +754,12 @@ function ensureRangeChild(parent, selector, tag, className, style) {
 }
 
 fetchData();
-setInterval(fetchData, 15000); // auto-refresh every 15s
+setInterval(fetchData, 5000); // auto-refresh every 5s
+
+// Page Visibility API: refetch immediately when tab becomes visible again
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') fetchData();
+});
 </script>
 </body>
 </html>

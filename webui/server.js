@@ -11,6 +11,22 @@ import { config } from "../config.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.WEBUI_PORT || 3031;
 
+// ── Global error handlers (prevent crash on unhandled rejections) ─────
+process.on("unhandledRejection", (reason, promise) => {
+  console.error(`[UNHANDLED REJECTION]`, reason?.stack || reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error(`[UNCAUGHT EXCEPTION]`, err?.stack || err);
+});
+
+// ── AbortController timeout helper (fetch does NOT natively support timeout) ──
+function fetchWithTimeout(url, opts = {}) {
+  const { timeout = 10000, ...rest } = opts;
+  const ac = new AbortController();
+  const id = setTimeout(() => ac.abort(), timeout);
+  return fetch(url, { ...rest, signal: ac.signal }).finally(() => clearTimeout(id));
+}
+
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
@@ -38,7 +54,7 @@ async function resolveMint(symbol) {
     const allPaper = paperMod.listPaperPositions();
     const pos = allPaper.find(p => p.pair?.split("-")[0]?.toUpperCase() === upper && p.pool_address);
     if (pos?.pool_address) {
-      const res = await fetch(`https://dlmm.datapi.meteora.ag/pools/${pos.pool_address}`);
+      const res = await fetchWithTimeout(`https://dlmm.datapi.meteora.ag/pools/${pos.pool_address}`, { timeout: 8000 });
       if (res.ok) {
         const data = await res.json();
         const mint = data.token_x?.address;
@@ -50,6 +66,26 @@ async function resolveMint(symbol) {
     }
   } catch {}
   return null;
+}
+
+// ── Kline in-memory cache (reduce subprocess spawns) ──────────────────
+const _klineCache = new Map();
+const KLINE_CACHE_TTL = 120_000; // 2 minutes
+
+function getCachedKline(key) {
+  const entry = _klineCache.get(key);
+  if (entry && Date.now() - entry.ts < KLINE_CACHE_TTL) return entry.data;
+  return null;
+}
+function setCachedKline(key, data) {
+  _klineCache.set(key, { ts: Date.now(), data });
+  // Prune stale entries periodically
+  if (_klineCache.size > 50) {
+    const cutoff = Date.now() - KLINE_CACHE_TTL;
+    for (const [k, v] of _klineCache) {
+      if (v.ts < cutoff) _klineCache.delete(k);
+    }
+  }
 }
 
 // ── Earliest deploy time (1h before first position) ────────────────────
@@ -101,7 +137,7 @@ async function fetchKlineFromMeteora(symbol, fromTs, toTs) {
     let endTime = null;
     for (let i = 0; i < 20 && allCandles.length < limit; i++) {
       const url = endTime ? `${base}&end_time=${endTime}` : base;
-      const resp = await fetch(url, { timeout: 10000 });
+      const resp = await fetchWithTimeout(url, { timeout: 10000 });
       if (!resp.ok) break;
       const data = await resp.json();
       const raw = data?.data ?? [];
@@ -143,6 +179,11 @@ app.get("/api/kline/:symbol", async (req, res) => {
     let fromTs = toTs - 6 * 3600;
     if (req.query.from) fromTs = parseInt(req.query.from, 10);
 
+    // Check in-memory cache before external calls
+    const cacheKey = `${req.query.position || symbol}_${fromTs}_${toTs}`;
+    const cached = getCachedKline(cacheKey);
+    if (cached) return res.json(cached);
+
     // Try Meteora first (same source as simulation) when position given
     let candles;
     if (req.query.position) {
@@ -177,10 +218,17 @@ app.get("/api/kline/:symbol", async (req, res) => {
       }
     }
 
-    res.json({ symbol, mint, from: fromTs, to: toTs, candles: candles });
+    const result = { symbol, mint, from: fromTs, to: toTs, candles: candles };
+    setCachedKline(cacheKey, result);
+    res.json(result);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// ── API: Health check ────────────────────────────────────────────────────
+app.get("/api/health", (req, res) => {
+  res.json({ status: "ok", uptime: process.uptime(), ts: Date.now() });
 });
 
 // ── API: All positions (open + closed) merged with state + config ─────────
