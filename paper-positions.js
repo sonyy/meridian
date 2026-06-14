@@ -312,6 +312,20 @@ export async function tickPaperPositions() {
 
   for (const pos of open) {
     try {
+      // ── Refresh pool TVL + SOL price each tick for accurate fees ──
+      let freshAvgTvl = pos.avg_existing_bin_tvl;
+      let freshTokenYPrice = pos.token_y_price ?? 68;
+      try {
+        const pool = await fetchPoolConfig(pos.pool_address);
+        if (pool.tvl > 0 && pool.tokenYPrice > 0) {
+          const activeBins = estimateActiveBins(pool.binStep || pos.bin_step || 100);
+          freshAvgTvl = pool.tvl / activeBins;
+          freshTokenYPrice = pool.tokenYPrice;
+          pos.avg_existing_bin_tvl = freshAvgTvl;
+          pos.token_y_price = freshTokenYPrice;
+        }
+      } catch (_) { /* use stored/fallback values */ }
+
       const candles = await fetchNewCandles(pos.pool_address, pos.last_candle_timestamp);
       if (candles.length === 0) continue;
 
@@ -322,7 +336,7 @@ export async function tickPaperPositions() {
           lowerPrice:         pos.lower_price,
           upperPrice:         pos.upper_price,
           lpFeeFraction:      pos.lp_fee_fraction,
-          avgExistingBinTvl:  pos.avg_existing_bin_tvl,
+          avgExistingBinTvl:  freshAvgTvl,
           weights:            pos.weights,
           lowerBinId:         pos.lower_bin_id,
           upperBinId:         pos.upper_bin_id,
@@ -330,7 +344,7 @@ export async function tickPaperPositions() {
           initialXUsd:        pos.initial_x_usd,
           initialYUsd:        pos.initial_y_usd,
           entryPrice:         pos.entry_price,
-          tokenYPrice:        pos.token_y_price,
+          tokenYPrice:        freshTokenYPrice,
         });
 
         fees_earned     += feeEarned;
