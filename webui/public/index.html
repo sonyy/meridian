@@ -344,8 +344,9 @@ function render(d) {
   const s = d.summary;
   document.getElementById('summary').innerHTML = `
     <div class="summary-card">
-      <div class="label">Wallet</div>
-      <div class="value">${d.wallet.sol.toFixed(4)} <span style="font-size:12px;color:var(--text2)">SOL</span></div>
+      <div class="label">Total Saldo</div>
+      <div class="value">${(d.wallet.sol + s.total_deployed_sol).toFixed(4)} <span style="font-size:12px;color:var(--text2)">SOL</span></div>
+      <div class="sub">wallet ${d.wallet.sol.toFixed(4)} + deployed ${s.total_deployed_sol.toFixed(2)}</div>
     </div>
     <div class="summary-card">
       <div class="label">Deployed</div>
