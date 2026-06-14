@@ -125,7 +125,7 @@ function buildWeights(strategyType, lowerBinId, upperBinId, activeBinId) {
   const w      = Array.from({ length: n }, (_, i) => {
     const d = i - center;
     if (strategyType === "curve")   return Math.exp(-0.5 * (d / sigma) ** 2);
-    if (strategyType === "bid-ask") return 1 - Math.exp(-0.5 * (d / sigma) ** 2) + 0.01;
+    if (strategyType === "bid_ask") return 1 - Math.exp(-0.5 * (d / sigma) ** 2) + 0.01;
     return 1; // spot
   });
   const total = w.reduce((s, v) => s + v, 0);

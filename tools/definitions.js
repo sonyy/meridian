@@ -1142,7 +1142,7 @@ Use before deploying a real position to validate range, strategy, and fee expect
           upper_price:   { type: "number", description: "Upper bound of price range" },
           strategy_type: {
             type: "string",
-            enum: ["spot", "curve", "bid-ask"],
+            enum: ["spot", "curve", "bid_ask"],
             description: "Liquidity distribution strategy (default: spot)",
           },
         },
