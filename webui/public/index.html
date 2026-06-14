@@ -268,7 +268,7 @@ Chart.register({
       const binData = chart.options._binData;
       if (binData && binData.length > 0) {
         const maxVol = binData.reduce((m, b) => Math.max(m, b.volume), 0) || 1;
-        const barMaxWidth = Math.max(20, (chartArea.right - chartArea.left) * 0.15);
+        const barMaxWidth = Math.max(60, (chartArea.right - chartArea.left) * 0.50);
         ctx.save();
         for (const b of binData) {
           const yPos = yScale.getPixelForValue(b.price);
