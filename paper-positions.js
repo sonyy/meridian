@@ -16,6 +16,9 @@ import { config } from "./config.js";
 const STATE_FILE = "./paper-positions.json";
 const DLMM_API  = "https://dlmm.datapi.meteora.ag";
 
+// ─── Tick mutex — prevent concurrent tickPaperPositions calls ─────────────────
+let _tickInProgress = false;
+
 // ─── Persistence ──────────────────────────────────────────────────────────────
 
 function load() {
@@ -30,7 +33,9 @@ function load() {
 
 function save(state) {
   try {
-    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+    const tmp = STATE_FILE + ".tmp." + process.pid;
+    fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
+    fs.renameSync(tmp, STATE_FILE);
   } catch (e) {
     log("paper_sim", `Failed to write ${STATE_FILE}: ${e.message}`);
   }
@@ -84,8 +89,12 @@ async function getConnection() {
 
 // ─── API helpers ──────────────────────────────────────────────────────────────
 
+const FETCH_TIMEOUT_MS = 10_000; // 10s timeout on all external API calls
+
 export async function fetchPoolConfig(poolAddress) {
-  const res = await fetch(`${DLMM_API}/pools/${poolAddress}`);
+  const res = await fetch(`${DLMM_API}/pools/${poolAddress}`, {
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
   if (!res.ok) throw new Error(`Pool fetch failed: ${res.status}`);
   const d = await res.json();
   return {
@@ -95,6 +104,7 @@ export async function fetchPoolConfig(poolAddress) {
     protocolFeePct:  d.pool_config?.protocol_fee_pct ?? 5,
     tvl:             d.tvl ?? 0,
     tokenXSymbol:    d.token_x?.symbol,
+    tokenXAddress:   d.token_x?.address || null,
     tokenYSymbol:    d.token_y?.symbol,
     tokenXPrice:     d.token_x?.price ?? 0,
     tokenYPrice:     d.token_y?.price ?? 0,
@@ -109,7 +119,9 @@ export async function fetchPoolConfig(poolAddress) {
 async function fetchNewCandles(poolAddress, fromTimestamp) {
   const end = Math.floor(Date.now() / 1000);
   const url  = `${DLMM_API}/pools/${poolAddress}/ohlcv?timeframe=5m&start_time=${fromTimestamp}&end_time=${end}`;
-  const res  = await fetch(url);
+  const res  = await fetch(url, {
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
   if (!res.ok) throw new Error(`OHLCV fetch failed: ${res.status}`);
   const data = await res.json();
   // Filter out the candle at exactly fromTimestamp (already processed)
@@ -220,7 +232,7 @@ export async function openPaperPosition({
   const { getBinIdFromPrice } = await getDLMMHelpers();
   const poolCfg = await fetchPoolConfig(pool_address);
 
-  const { binStep, baseFeePct, protocolFeePct, tvl, name, tokenXSymbol, tokenYSymbol, tokenYPrice, currentPrice } = poolCfg;
+  const { binStep, baseFeePct, protocolFeePct, tvl, name, tokenXSymbol, tokenXAddress, tokenYSymbol, tokenYPrice, currentPrice } = poolCfg;
   const lpFeeFraction = (baseFeePct / 100) * (1 - protocolFeePct / 100);
 
   const lowerBinId  = getBinIdFromPrice(lower_price, binStep, true);
@@ -257,6 +269,7 @@ export async function openPaperPosition({
     pool_address,
     pool_name:    name || pool_address.slice(0, 8),
     pair:         `${tokenXSymbol}-${tokenYSymbol}`,
+    base_mint:    tokenXAddress,
     deposit_amount,
     lower_price,
     upper_price,
@@ -304,78 +317,91 @@ export async function openPaperPosition({
  * Called every 5m from the cron in index.js.
  */
 export async function tickPaperPositions() {
-  const state = load();
-  const open  = Object.values(state.positions).filter((p) => p.status === "open");
-  if (open.length === 0) return;
-
-  log("paper_sim", `Ticking ${open.length} paper position(s)`);
-
-  for (const pos of open) {
-    try {
-      // ── Refresh pool TVL + SOL price each tick for accurate fees ──
-      let freshAvgTvl = pos.avg_existing_bin_tvl;
-      let freshTokenYPrice = pos.token_y_price ?? 68;
-      try {
-        const pool = await fetchPoolConfig(pos.pool_address);
-        if (pool.tvl > 0 && pool.tokenYPrice > 0) {
-          const activeBins = estimateActiveBins(pool.binStep || pos.bin_step || 100);
-          freshAvgTvl = pool.tvl / activeBins;
-          freshTokenYPrice = pool.tokenYPrice;
-          pos.avg_existing_bin_tvl = freshAvgTvl;
-          pos.token_y_price = freshTokenYPrice;
-        }
-      } catch (_) { /* use stored/fallback values */ }
-
-      const candles = await fetchNewCandles(pos.pool_address, pos.last_candle_timestamp);
-      if (candles.length === 0) continue;
-
-      let { fees_earned, il_usd, candles_total, candles_in_range } = pos;
-
-      for (const candle of candles) {
-        const { feeEarned, ilUsd, currentPrice, inRange } = processCandle(candle, {
-          lowerPrice:         pos.lower_price,
-          upperPrice:         pos.upper_price,
-          lpFeeFraction:      pos.lp_fee_fraction,
-          avgExistingBinTvl:  freshAvgTvl,
-          weights:            pos.weights,
-          lowerBinId:         pos.lower_bin_id,
-          upperBinId:         pos.upper_bin_id,
-          depositAmount:      pos.deposit_amount,
-          initialXUsd:        pos.initial_x_usd,
-          initialYUsd:        pos.initial_y_usd,
-          entryPrice:         pos.entry_price,
-          tokenYPrice:        freshTokenYPrice,
-        });
-
-        fees_earned     += feeEarned;
-        il_usd           = ilUsd;
-        candles_total   += 1;
-        if (inRange) candles_in_range += 1;
-
-        pos.last_price            = currentPrice;
-        pos.last_candle_timestamp = candle.timestamp;
-      }
-
-      pos.fees_earned      = fees_earned;
-      pos.il_usd           = il_usd;
-      pos.net_pnl          = fees_earned + il_usd;
-      pos.candles_total    = candles_total;
-      pos.candles_in_range = candles_in_range;
-
-      const netPnlPct = pos.deposit_amount > 0 ? (pos.net_pnl / pos.deposit_amount) * 100 : 0;
-      if (pos.peak_pnl_pct == null || netPnlPct > pos.peak_pnl_pct) {
-        pos.peak_pnl_pct = netPnlPct;
-      }
-      pos.trailing_active = pos.peak_pnl_pct >= (config.management?.trailingTriggerPct ?? 3);
-
-      state.positions[pos.id] = pos;
-      log("paper_sim", `${pos.id} ticked +${candles.length} candles | fees=◎${pos.fees_earned} IL=◎${pos.il_usd} netPnL=◎${pos.net_pnl}`);
-    } catch (e) {
-      log("paper_sim", `Tick failed for ${pos.id}: ${e.message}`);
-    }
+  // Mutex: prevent concurrent calls from schedulePaperTick + CRON cycles
+  if (_tickInProgress) {
+    log("paper_sim", "Tick skipped — another tick already in progress");
+    return;
   }
+  _tickInProgress = true;
+  try {
+    const state = load();
+    const open  = Object.values(state.positions).filter((p) => p.status === "open");
+    if (open.length === 0) {
+      log("paper_sim", "No open positions to tick");
+      return;
+    }
 
-  save(state);
+    log("paper_sim", `Ticking ${open.length} paper position(s)`);
+
+    for (const pos of open) {
+      try {
+        // ── Refresh pool TVL + SOL price each tick for accurate fees ──
+        let freshAvgTvl = pos.avg_existing_bin_tvl;
+        let freshTokenYPrice = pos.token_y_price ?? 68;
+        try {
+          const pool = await fetchPoolConfig(pos.pool_address);
+          if (pool.tvl > 0 && pool.tokenYPrice > 0) {
+            const activeBins = estimateActiveBins(pool.binStep || pos.bin_step || 100);
+            freshAvgTvl = pool.tvl / activeBins;
+            freshTokenYPrice = pool.tokenYPrice;
+            pos.avg_existing_bin_tvl = freshAvgTvl;
+            pos.token_y_price = freshTokenYPrice;
+          }
+        } catch (_) { /* use stored/fallback values */ }
+
+        const candles = await fetchNewCandles(pos.pool_address, pos.last_candle_timestamp);
+        if (candles.length === 0) continue;
+
+        let { fees_earned, il_usd, candles_total, candles_in_range } = pos;
+
+        for (const candle of candles) {
+          const { feeEarned, ilUsd, currentPrice, inRange } = processCandle(candle, {
+            lowerPrice:         pos.lower_price,
+            upperPrice:         pos.upper_price,
+            lpFeeFraction:      pos.lp_fee_fraction,
+            avgExistingBinTvl:  freshAvgTvl,
+            weights:            pos.weights,
+            lowerBinId:         pos.lower_bin_id,
+            upperBinId:         pos.upper_bin_id,
+            depositAmount:      pos.deposit_amount,
+            initialXUsd:        pos.initial_x_usd,
+            initialYUsd:        pos.initial_y_usd,
+            entryPrice:         pos.entry_price,
+            tokenYPrice:        freshTokenYPrice,
+          });
+
+          fees_earned     += feeEarned;
+          il_usd           = ilUsd;
+          candles_total   += 1;
+          if (inRange) candles_in_range += 1;
+
+          pos.last_price            = currentPrice;
+          pos.last_candle_timestamp = candle.timestamp;
+        }
+
+        pos.fees_earned      = fees_earned;
+        pos.il_usd           = il_usd;
+        pos.net_pnl          = fees_earned + il_usd;
+        pos.candles_total    = candles_total;
+        pos.candles_in_range = candles_in_range;
+
+        const netPnlPct = pos.deposit_amount > 0 ? (pos.net_pnl / pos.deposit_amount) * 100 : 0;
+        if (pos.peak_pnl_pct == null || netPnlPct > pos.peak_pnl_pct) {
+          pos.peak_pnl_pct = netPnlPct;
+        }
+        pos.trailing_active = pos.peak_pnl_pct >= (config.management?.trailingTriggerPct ?? 3);
+
+        state.positions[pos.id] = pos;
+        log("paper_sim", `${pos.id} ticked +${candles.length} candles | fees=◎${pos.fees_earned} IL=◎${pos.il_usd} netPnL=◎${pos.net_pnl}`);
+      } catch (e) {
+        log("paper_sim", `Tick failed for ${pos.id}: ${e.message}`);
+      }
+    }
+
+    save(state);
+  } finally {
+    _tickInProgress = false;
+  }
 }
 
 /**
@@ -394,6 +420,28 @@ export function getPaperPosition(id) {
 export function listPaperPositions() {
   const state = load();
   return Object.values(state.positions).map(formatSummary);
+}
+
+/**
+ * Patch a field on a paper position (e.g. backfill base_mint for existing positions).
+ * Returns true if the position was found and updated, false otherwise.
+ */
+export function patchPaperPosition(id, updates) {
+  const state = load();
+  const pos   = state.positions[id];
+  if (!pos) return false;
+  let changed = false;
+  for (const [k, v] of Object.entries(updates)) {
+    if (pos[k] !== v) {
+      pos[k] = v;
+      changed = true;
+    }
+  }
+  if (changed) {
+    state.positions[id] = pos;
+    save(state);
+  }
+  return true;
 }
 
 /**
@@ -440,6 +488,7 @@ function formatSummary(pos) {
     entry_price:   pos.entry_price,
     last_price:    pos.last_price,
     opened_at:     pos.opened_at,
+    base_mint:     pos.base_mint ?? null,
     closed_at:     pos.closed_at ?? null,
     duration_hours: durationHours,
     fees_earned:   pos.fees_earned,

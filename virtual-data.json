@@ -1,13 +1,13 @@
 {
   "wallet": {
-    "sol": 0.0755,
+    "sol": 0.061191,
     "initial_sol": 0.247
   },
   "stats": {
-    "total_deploys": 18,
-    "total_closes": 12,
-    "total_fees_earned": 0.0001,
-    "total_pnl": -0.0015,
+    "total_deploys": 33,
+    "total_closes": 26,
+    "total_fees_earned": 0.0021993005056482567,
+    "total_pnl": -0.005809831618457383,
     "created_at": "2026-06-11T05:18:00.000Z"
   }
 }

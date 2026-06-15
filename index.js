@@ -135,17 +135,25 @@ const PAPER_TICK_STALL_MS = 360_000;  // 6 min stall threshold → force tick
 
 function paperTickIntervalMs() {
   const openPositions = listPaperPositions().filter((p) => p.status === "open");
-  if (openPositions.length === 0) return PAPER_TICK_IDLE_MS;
+  const openCount = openPositions.length;
 
-  for (const p of openPositions) {
-    const netPnlPct = p.deposit > 0 ? (p.net_pnl / p.deposit) * 100 : 0;
-    const sl = config.management?.stopLossPct;
-    const tp = config.management?.takeProfitPct;
-    if (sl != null && netPnlPct <= sl + 3) return PAPER_TICK_FAST_MS;
-    if (tp != null && netPnlPct >= tp - 3) return PAPER_TICK_FAST_MS;
+  let result;
+  if (openCount === 0) {
+    result = PAPER_TICK_IDLE_MS;
+  } else {
+    let nearSlTp = false;
+    for (const p of openPositions) {
+      const netPnlPct = p.deposit > 0 ? (p.net_pnl / p.deposit) * 100 : 0;
+      const sl = config.management?.stopLossPct;
+      const tp = config.management?.takeProfitPct;
+      if (sl != null && netPnlPct <= sl + 3) { nearSlTp = true; break; }
+      if (tp != null && netPnlPct >= tp - 3) { nearSlTp = true; break; }
+    }
+    result = nearSlTp ? PAPER_TICK_FAST_MS : PAPER_TICK_NORMAL_MS;
   }
 
-  return PAPER_TICK_NORMAL_MS;
+  log("paper_sim", `Tick interval: ${result / 1000}s (${openCount} open positions)`);
+  return result;
 }
 
 function schedulePaperTick() {
@@ -160,8 +168,8 @@ function schedulePaperTick() {
       log("paper_sim", `Tick stall detected (${Math.round(sinceLast / 1000)}s since last), forcing immediate tick`);
     }
 
-    _lastPaperTickTime = Date.now();
     await tickPaperPositions().catch((e) => log("cron_error", `Paper sim tick failed: ${e.message}`));
+    _lastPaperTickTime = Date.now();
     schedulePaperTick();
   };
 

@@ -32,6 +32,10 @@ logs/
 # Dev context
 context.md
 docs/
+.omo/
+
+# Auto-generated caches
+webui/mint-cache.json
 
 # Test files
 test-*.js

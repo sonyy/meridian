@@ -1,6 +1,7 @@
 import express from "express";
 import { createServer } from "http";
 import path from "path";
+import fs from "fs";
 import { fileURLToPath } from "url";
 import { exec } from "child_process";
 import { promisify } from "util";
@@ -44,15 +45,55 @@ for (const [k, v] of Object.entries(TOKEN_MINTS)) {
   TOKEN_MINTS[k.toLowerCase()] = v;
 }
 
-const _mintCache = {};
+// Persistent mint cache — survives PM2 restart
+const MINT_CACHE_FILE = path.join(__dirname, "mint-cache.json");
+function loadMintCache() {
+  try {
+    if (fs.existsSync(MINT_CACHE_FILE)) {
+      return JSON.parse(fs.readFileSync(MINT_CACHE_FILE, "utf8"));
+    }
+  } catch (e) {
+    log("webui", `Failed to load mint cache: ${e.message}`);
+  }
+  return {};
+}
+function saveMintCache(cache) {
+  try {
+    fs.writeFileSync(MINT_CACHE_FILE + ".tmp", JSON.stringify(cache, null, 2));
+    fs.renameSync(MINT_CACHE_FILE + ".tmp", MINT_CACHE_FILE);
+  } catch (e) {
+    log("webui", `Failed to save mint cache: ${e.message}`);
+  }
+}
+
+let _mintCache = loadMintCache();
+let _mintCacheDirty = false;
+// Periodic save every 30s if dirty
+setInterval(() => {
+  if (_mintCacheDirty) {
+    saveMintCache(_mintCache);
+    _mintCacheDirty = false;
+  }
+}, 30_000);
+
 async function resolveMint(symbol) {
   const upper = symbol.toUpperCase();
   if (TOKEN_MINTS[upper]) return TOKEN_MINTS[upper];
   if (_mintCache[upper]) return _mintCache[upper];
+
+  // Check if any paper position already stores base_mint
   try {
     const paperMod = await import("../paper-positions.js");
     const allPaper = paperMod.listPaperPositions();
-    const pos = allPaper.find(p => p.pair?.split("-")[0]?.toUpperCase() === upper && p.pool_address);
+    const pos = allPaper.find(p => {
+      const pSym = p.pair?.split("-")[0]?.toUpperCase();
+      return pSym === upper && (p.base_mint || p.pool_address);
+    });
+    if (pos?.base_mint) {
+      _mintCache[upper] = pos.base_mint;
+      _mintCacheDirty = true;
+      return pos.base_mint;
+    }
     if (pos?.pool_address) {
       const res = await fetchWithTimeout(`https://dlmm.datapi.meteora.ag/pools/${pos.pool_address}`, { timeout: 8000 });
       if (res.ok) {
@@ -60,6 +101,7 @@ async function resolveMint(symbol) {
         const mint = data.token_x?.address;
         if (mint) {
           _mintCache[upper] = mint;
+          _mintCacheDirty = true;
           return mint;
         }
       }
@@ -184,16 +226,15 @@ app.get("/api/kline/:symbol", async (req, res) => {
     const cached = getCachedKline(cacheKey);
     if (cached) return res.json(cached);
 
-    // Try Meteora first (same source as simulation) when position given
-    let candles;
-    if (req.query.position) {
-      candles = await fetchKlineFromMeteora(symbol, fromTs, toTs);
-    }
+    // Fetch from both sources in parallel — prefer GMGN (real price movement)
+    // over Meteora OHLCV (may be flat/sparse for low-volume pools)
+    const [gmgnCandles, meteoraCandles] = await Promise.all([
+      fetchKlineAll(mint, fromTs, toTs),
+      req.query.position ? fetchKlineFromMeteora(symbol, fromTs, toTs) : Promise.resolve([]),
+    ]);
 
-    // Fall back to GMGN
-    if (!candles || candles.length === 0) {
-      candles = await fetchKlineAll(mint, fromTs, toTs);
-    }
+    // Prefer GMGN (more candles = richer price data). Fall back to Meteora only if GMGN returns nothing useful.
+    let candles = gmgnCandles.length >= 2 ? gmgnCandles : (meteoraCandles.length > 0 ? meteoraCandles : gmgnCandles);
 
     // Scale all candles to align with position entry_price
     if (req.query.position && candles.length > 0) {
@@ -244,6 +285,29 @@ app.get("/api/positions", async (req, res) => {
     const trackedArray = stateMod.getTrackedPositions();
     const tracked = Object.fromEntries(trackedArray.map(t => [t.position, t]));
     const wallet = virtualMod.getVirtualWalletBalances();
+
+    // Pre-resolve unknown mints so GMGN links work for all positions
+    const uniqueSymbols = [...new Set(allPaper.map(p => p.pair?.split("-")[0]?.toUpperCase()).filter(Boolean))];
+    const resolved = await Promise.allSettled(
+      uniqueSymbols.map(async (sym) => ({ sym, mint: await resolveMint(sym) }))
+    );
+    // Backfill: write resolved mints back into position data so it survives API downtime
+    for (const r of resolved) {
+      if (r.status !== "fulfilled" || !r.value?.mint) continue;
+      const { sym, mint } = r.value;
+      for (const p of allPaper) {
+        if (p.base_mint) continue;
+        const pSym = p.pair?.split("-")[0]?.toUpperCase();
+        if (pSym === sym) {
+          paperMod.patchPaperPosition(p.id, { base_mint: mint });
+        }
+      }
+    }
+    // Persist cache immediately after backfill
+    if (_mintCacheDirty) {
+      saveMintCache(_mintCache);
+      _mintCacheDirty = false;
+    }
 
     const open = await Promise.all(
       allPaper
@@ -370,7 +434,17 @@ function enrich(paperPos, trackedMap, status) {
     trailing_active: t?.trailing_active ?? false,
     out_of_range_since: t?.out_of_range_since || null,
     pool_address: paperPos.pool_address || null,
-    token_mint: (paperPos.pair?.split("-")[0] && (TOKEN_MINTS[paperPos.pair.split("-")[0].toUpperCase()] || null)) || null,
+    token_mint: (() => {
+      // 1) base_mint stored in position data at creation time (permanent, no upstream dep)
+      if (paperPos.base_mint) return paperPos.base_mint;
+      // 2) hardcoded TOKEN_MINTS (known tokens)
+      const sym = paperPos.pair?.split("-")[0]?.toUpperCase();
+      if (!sym) return null;
+      if (TOKEN_MINTS[sym]) return TOKEN_MINTS[sym];
+      // 3) persistent mint cache from previous resolveMint() calls
+      if (_mintCache[sym]) return _mintCache[sym];
+      return null;
+    })(),
     chart_token: paperPos.pair?.split("-")[0] || null,
     close_reason: (() => {
       const r = paperPos.close_reason;

@@ -130,9 +130,9 @@
   /* ─── chart area ─── */
   .chart-wrap {
     position: relative; height: 90px; margin-top: 4px; border-radius: 6px;
-    background: var(--bg3); overflow: hidden;
+    background: var(--bg3); overflow: hidden; width: 100%;
   }
-  .chart-wrap canvas { width: 100% !important; height: 90px !important; }
+  .chart-wrap canvas { width: 100% !important; height: 90px !important; max-width: 100%; }
 
   /* ─── range bar ─── */
   .range-bar-wrap {
@@ -480,7 +480,7 @@ function renderCard(p, c) {
           <span class="m-label">candles</span><span class="m-value">${p.candles_total || 0}</span>
           <span class="m-label">SL / TP</span><span class="m-value"><span style="color:var(--red)">${c.stopLossPct}%</span> / <span style="color:var(--green)">+${c.takeProfitPct}%</span></span>
         </div>
-        <div style="margin-top:8px">
+        <div style="margin-top:8px;width:100%">
           <div class="chart-wrap"></div>
           <div class="range-bar-wrap"></div>
           <div class="pnl-bar-wrap"></div>
@@ -612,6 +612,10 @@ function drawChart(p, i, c) {
       if (ch) ch.destroy();
       ch = new Chart(ctx, {
         type: 'line',
+        plugins: [{
+          id: 'forceLeftZero',
+          afterLayout(chart) { chart.chartArea.left = 0; },
+        }],
         data: {
           labels,
           datasets: [
@@ -633,9 +637,11 @@ function drawChart(p, i, c) {
               grid: { display: false },
             },
             y: {
-              type: 'logarithmic', display: true, min: yMin, max: yMax,
-              ticks: { display: false, color: '#888b98', font: { size: 9, family: 'IBM Plex Mono' }, callback: v => v.toExponential(2), maxTicksLimit: 5 },
-              grid: { color: 'rgba(36,40,52,0.6)', drawBorder: false },
+              type: 'logarithmic', min: yMin, max: yMax,
+              ticks: { display: false },
+              grid: { display: false, drawBorder: false, drawTicks: false },
+              border: { display: false },
+              afterFit: axis => { axis.width = 0; axis.paddingTop = 0; axis.paddingBottom = 0; axis.paddingLeft = 0; axis.paddingRight = 0; },
             },
           },
           interaction: { intersect: false, mode: 'index' },
