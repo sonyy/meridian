@@ -1173,6 +1173,7 @@ Use before deploying a real position to validate range, strategy, and fee expect
         required: ["id"],
         properties: {
           id: { type: "string", description: "Paper position ID to close" },
+          reason: { type: "string", description: "Optional reason for closing (e.g. stop_loss, take_profit, out_of_range, low_yield, manual)" },
         },
       },
     },

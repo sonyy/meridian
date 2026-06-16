@@ -19,8 +19,8 @@ export async function get_paper_position({ id }) {
   return getPaperPosition(id);
 }
 
-export async function close_paper_position({ id }) {
-  return closePaperPosition(id);
+export async function close_paper_position({ id, reason }) {
+  return closePaperPosition(id, reason ?? null);
 }
 
 export async function list_paper_positions() {
