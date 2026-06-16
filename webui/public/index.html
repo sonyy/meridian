@@ -368,7 +368,7 @@ function render(d) {
   const c = d.config;
   document.getElementById('configBar').innerHTML = `
     <span class="config-tag">strategy <strong>${c.strategy}</strong></span>
-    <span class="config-tag">bins <strong>${c.minBinsBelow ?? '?'}–${c.maxBinsBelow ?? '?'}</strong></span>
+    <span class="config-tag">range bins <strong>${c.minBinsBelow ?? '?'}–${c.maxBinsBelow ?? '?'}</strong></span>
     <span class="config-tag">bin step <strong>${c.minBinStep ?? '?'}–${c.maxBinStep ?? '?'}</strong></span>
     <span class="config-tag">SL <strong>${c.stopLossPct}%</strong></span>
     <span class="config-tag">TP <strong>${c.takeProfitPct}%</strong></span>
@@ -378,6 +378,15 @@ function render(d) {
     <span class="config-tag">gas <strong>${c.gasReserve} SOL</strong></span>
     <span class="config-tag">size <strong>${(c.positionSizePct * 100)}%</strong></span>
     <span class="config-tag">max <strong>${c.maxDeployAmount} SOL</strong></span>
+    <span class="config-tag">fee/TVL <strong>${c.minFeeActiveTvlRatio ?? '?'}</strong></span>
+    <span class="config-tag">TVL <strong>${c.minTvl?.toLocaleString() ?? '?'}–${c.maxTvl?.toLocaleString() ?? '?'}</strong></span>
+    <span class="config-tag">vol <strong>≥${c.minVolume ?? '?'}</strong></span>
+    <span class="config-tag">organic <strong>≥${c.minOrganic ?? '?'}</strong></span>
+    <span class="config-tag">holders <strong>≥${c.minHolders ?? '?'}</strong></span>
+    <span class="config-tag">mcap <strong>${c.minMcap?.toLocaleString() ?? '?'}–${c.maxMcap?.toLocaleString() ?? '?'}</strong></span>
+    <span class="config-tag">age <strong>${c.minTokenAgeHours ?? '?'}–${c.maxTokenAgeHours ?? '?'}h</strong></span>
+    <span class="config-tag">yield24h <strong>≥${c.minFeePerTvl24h ?? '?'}%</strong></span>
+    <span class="config-tag">🧪 <strong>${c.virtualMode ? 'ON' : 'OFF'}</strong></span>
   `;
 
   // === open positions (DOM diff — preserve canvas elements) ===
@@ -677,23 +686,30 @@ function drawChart(p, i, c) {
       });
     }
 
-    // PnL bar (SL/TP vs net PnL)
+    // PnL bar (SL/TP/trail vs net PnL)
     const pnlBar = card.querySelector('.pnl-bar-wrap');
     if (pnlBar) {
       const slPct = c.stopLossPct;
       const tpPct = c.takeProfitPct;
       const netPnlPct = p.pnl_pct || 0;
-      const pnlSpan = tpPct - slPct;
-      // Zoom out 30% each side so OOR cursor stays visible
+      // Determine the rightmost threshold for zoom (may extend past TP when trailing is active)
+      let effectiveHi = tpPct;
+      let trailPct = null;
+      if (c.trailingTakeProfit && p.trailing_active && p.peak_pnl_pct != null) {
+        trailPct = p.peak_pnl_pct - c.trailingDropPct;
+        effectiveHi = Math.max(tpPct, trailPct);
+      }
+      const span = effectiveHi - slPct;
       const zoom = 0.3;
-      const barLo = slPct - pnlSpan * zoom;
-      const barHi = tpPct + pnlSpan * zoom;
+      const barLo = slPct - span * zoom;
+      const barHi = effectiveHi + span * zoom;
       const barSpan = barHi - barLo || 1;
       const curX    = Math.min(Math.max(((netPnlPct - barLo) / barSpan) * 100, 2), 98);
       const slX     = ((slPct - barLo) / barSpan) * 100;
       const tpX     = ((tpPct - barLo) / barSpan) * 100;
+      const trailX  = trailPct != null ? ((trailPct - barLo) / barSpan) * 100 : null;
 
-      renderPnlBar(pnlBar, { slPct, tpPct, netPnlPct, curX, slX, tpX });
+      renderPnlBar(pnlBar, { slPct, tpPct, netPnlPct, curX, slX, tpX, trailX, trailPct, barLo, barSpan });
     }
   });
 }
@@ -726,7 +742,8 @@ function renderRangeBar(rangeEl, data) {
 }
 
 function renderPnlBar(el, d) {
-  const C_BLUE = '#60a5fa';
+  const C_BLUE   = '#60a5fa';
+  const C_AMBER  = '#f59e0b';
 
   // Background gradient
   let bg = el.querySelector('.pnl-bar-bg');
@@ -754,20 +771,31 @@ function renderPnlBar(el, d) {
   tpLbl.style.transform = 'translateX(3px)';
   tpLbl.textContent = `+${d.tpPct}%`;
 
+  // Trailing exit line (amber, dashed) — only when trailing is active
+  let trailLine = el.querySelector('.pnl-trail-line');
+  let trailLbl  = el.querySelector('.pnl-trail-label');
+  if (d.trailX != null) {
+    if (!trailLine) { trailLine = document.createElement('div'); trailLine.className = 'pnl-trail-line'; el.appendChild(trailLine); }
+    trailLine.style.cssText = `position:absolute;top:0;width:1.5px;height:100%;background:repeating-linear-gradient(90deg,${C_AMBER},${C_AMBER} 3px,transparent 3px,transparent 6px);z-index:4;pointer-events:none;left:${d.trailX}%`;
+
+    if (!trailLbl) { trailLbl = document.createElement('div'); trailLbl.className = 'pnl-trail-label'; el.appendChild(trailLbl); }
+    trailLbl.style.cssText = `position:absolute;bottom:0;font-size:7px;font-family:'IBM Plex Mono',monospace;white-space:nowrap;z-index:4;color:${C_AMBER};left:${d.trailX}%;transform:translateX(3px)`;
+    trailLbl.textContent = `trail ${d.trailPct >= 0 ? '+' : ''}${d.trailPct.toFixed(1)}%`;
+  } else {
+    if (trailLine) trailLine.remove();
+    if (trailLbl) trailLbl.remove();
+  }
+
   // Cursor vertical line
   let cur = el.querySelector('.pnl-cursor');
   if (!cur) { cur = document.createElement('div'); cur.className = 'pnl-cursor'; el.appendChild(cur); }
   cur.style.left = `${d.curX}%`;
   cur.style.background = C_BLUE;
 
-  // Zero vertical line (white)
+  // Zero vertical line (white) — use same bar bounds as caller for alignment
   let zero = el.querySelector('.pnl-zero-line');
   if (!zero) { zero = document.createElement('div'); zero.className = 'pnl-zero-line'; el.appendChild(zero); }
-  const pnlSpanZ = d.tpPct - d.slPct;
-  const zoomZ = 0.3;
-  const barLoZ = d.slPct - pnlSpanZ * zoomZ;
-  const barSpanZ = (d.tpPct + pnlSpanZ * zoomZ) - barLoZ || 1;
-  const zeroX = ((0 - barLoZ) / barSpanZ) * 100;
+  const zeroX = d.barSpan > 0 ? ((0 - d.barLo) / d.barSpan) * 100 : 50;
   zero.style.cssText = `position:absolute;top:0;width:1px;height:100%;background:rgba(255,255,255,0.4);z-index:2;pointer-events:none;left:${zeroX}%`;
 
   // Cursor label

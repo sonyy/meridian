@@ -41,21 +41,58 @@ function save(state) {
   }
 }
 
-// ─── Concentration model ──────────────────────────────────────────────────────
+// ─── Real active bin TVL via SDK ─────────────────────────────────────────────
+
+/**
+ * Fetch real per-bin liquidity from on-chain via the Meteora DLMM SDK.
+ * Only called once when opening a paper position — not every tick.
+ * Falls back to heuristic (TVL/estimated-bins) if SDK or RPC fails.
+ */
+async function fetchRealBinTvl(poolAddress, lowerBinId, upperBinId, tokenXPrice, tokenYPrice, binStep, fallbackTvl) {
+  try {
+    const { DLMM } = await getDLMMHelpers();
+    const connection = await getConnection();
+    const pool = await DLMM.create(connection, poolAddress);
+
+    const binCount = upperBinId - lowerBinId + 1;
+    const bins = await pool.getBins(
+      pool.pubkey,
+      lowerBinId,
+      upperBinId,
+      pool.tokenX.mint.decimals,
+      pool.tokenY.mint.decimals,
+    );
+
+    let totalTvlUsd = 0;
+    let populatedCount = 0;
+    for (const bin of bins) {
+      const xAmt = Number(bin.xAmount) / 10 ** pool.tokenX.mint.decimals;
+      const yAmt = Number(bin.yAmount) / 10 ** pool.tokenY.mint.decimals;
+      const binTvl = xAmt * tokenXPrice + yAmt * tokenYPrice;
+      if (binTvl > 0) populatedCount++;
+      totalTvlUsd += binTvl;
+    }
+
+    if (populatedCount > 0) {
+      return totalTvlUsd / binCount;
+    }
+  } catch (e) {
+    log("paper_sim", `fetchRealBinTvl failed, falling back to heuristic: ${e.message}`);
+  }
+
+  const totalActiveBins = fallbackTvl > 0 ? estimateActiveBins(binStep) : 1;
+  return fallbackTvl > 0 ? fallbackTvl / totalActiveBins : 0;
+}
 
 /**
  * Estimate total active bins in a DLMM pool based on bin step.
- * DLMM pools concentrate liquidity in a band around the current price.
- * Narrow binStep → more bins for same price range → more total active bins.
- *
- * These are calibrated for memecoin pools where LPs typically cover
- * a ~50-200% price band around the active price.
+ * Kept as fallback only.
  */
 function estimateActiveBins(binStep) {
-  if (binStep <= 10)  return 200;  // tight pools (SOL-USDC, stables)
-  if (binStep <= 50)  return 150;  // moderate
-  if (binStep <= 125) return 100;  // typical memecoin-SOL (Bountywork, Magpie)
-  return 60;                        // wide step (binStep ≥ 200)
+  if (binStep <= 10)  return 200;
+  if (binStep <= 50)  return 150;
+  if (binStep <= 125) return 100;
+  return 60;
 }
 
 // ─── DLMM helpers (lazy-loaded) ───────────────────────────────────────────────
@@ -243,12 +280,14 @@ export async function openPaperPosition({
   const normEntryPrice = sdkMidPrice * priceScale; // ≈ currentPrice
 
   const numBins           = upperBinId - lowerBinId + 1;
-  // Use estimated total active bins (not numBins) so avgTvlShare reflects
-  // DLMM concentration: our narrow-range deposit competes only against
-  // the active liquidity band, not the entire pool's TVL.
-  const totalActiveBins   = tvl > 0 ? estimateActiveBins(binStep) : 1;
-  const avgExistingBinTvl = tvl > 0 ? tvl / totalActiveBins : deposit_amount;
   const weights           = buildWeights(strategy_type, lowerBinId, upperBinId, activeBinId);
+  // Fetch real per-bin TVL from on-chain via SDK (once at open).
+  // Falls back to heuristic (TVL/estimated-active-bins) if RPC fails.
+  const realAvgTvl = await fetchRealBinTvl(
+    pool_address, lowerBinId, upperBinId,
+    poolCfg.tokenXPrice || 0, tokenYPrice, binStep, tvl
+  );
+  const avgExistingBinTvl = realAvgTvl > 0 ? realAvgTvl : (tvl > 0 ? tvl / Math.max(estimateActiveBins(binStep), 1) : deposit_amount);
 
   const nowSec = Math.floor(Date.now() / 1000);
   const id     = `paper-${Date.now().toString(36)}`;
@@ -269,6 +308,7 @@ export async function openPaperPosition({
     upper_bin_id:     upperBinId,
     weights,
     avg_existing_bin_tvl: avgExistingBinTvl,
+    initial_tvl:          tvl, // snapshot at open, used for tick-scaling
     token_y_price:        tokenYPrice,
 
     // entry state (prices in OHLCV/datapi scale)
@@ -322,17 +362,17 @@ export async function tickPaperPositions() {
 
     for (const pos of open) {
       try {
-        // ── Refresh pool TVL + SOL price each tick for accurate fees ──
-        let freshAvgTvl = pos.avg_existing_bin_tvl;
+        // ── Scale SDK-snapshot per-bin TVL by live TVL ratio ──
+        let freshAvgTvl     = pos.avg_existing_bin_tvl;
         let freshTokenYPrice = pos.token_y_price ?? 68;
         try {
           const pool = await fetchPoolConfig(pos.pool_address);
           if (pool.tvl > 0 && pool.tokenYPrice > 0) {
-            const activeBins = estimateActiveBins(pool.binStep || pos.bin_step || 100);
-            freshAvgTvl = pool.tvl / activeBins;
+            const tvlRatio = (pos.initial_tvl > 0) ? pool.tvl / pos.initial_tvl : 1;
+            freshAvgTvl = pos.avg_existing_bin_tvl * Math.max(tvlRatio, 0.1);
             freshTokenYPrice = pool.tokenYPrice;
-            pos.avg_existing_bin_tvl = freshAvgTvl;
             pos.token_y_price = freshTokenYPrice;
+            // Don't update avg_existing_bin_tvl — keep the SDK snapshot for next scale
           }
         } catch (_) { /* use stored/fallback values */ }
 
