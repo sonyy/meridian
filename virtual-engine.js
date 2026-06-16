@@ -360,12 +360,14 @@ export function getVirtualPositionsAsReal() {
     const hoursOpen = durationMs / 3600000;
     const pnlPct = pp.deposit > 0 ? (pp.net_pnl / pp.deposit) * 100 : 0;
 
-    // Use paper position's annualized fee APR if available, else estimate
+    // fee_per_tvl_24h must match the real Meteora API scale: annualized APY (%).
+    // The formatSummary annualized_fee_apr is already annualized.
+    // Fallback uses the same formula: (fees/deposit) / hoursOpen * 8760 * 100.
     let feePerTvl24h = null;
     if (pp.annualized_fee_apr != null) {
       feePerTvl24h = +pp.annualized_fee_apr.toFixed(2);
     } else if (pp.fees_earned > 0 && pp.deposit > 0 && hoursOpen > 0) {
-      feePerTvl24h = +(((pp.fees_earned / pp.deposit) / hoursOpen) * 24 * 100).toFixed(2);
+      feePerTvl24h = +(((pp.fees_earned / pp.deposit) / hoursOpen) * 8760 * 100).toFixed(2);
     }
 
     return {

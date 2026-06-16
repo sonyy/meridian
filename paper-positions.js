@@ -144,32 +144,6 @@ function buildWeights(strategyType, lowerBinId, upperBinId, activeBinId) {
   return w.map((v) => v / total);
 }
 
-// ─── Initial X/Y token split ──────────────────────────────────────────────────
-
-/**
- * Compute how the deposit splits into token X and token Y at entry.
- * Uses concentrated liquidity geometry (sqrt-price space).
- * Returns { xUsd, yUsd } — both in USD.
- */
-function computeInitialSplit(depositUsd, entryPrice, lowerPrice, upperPrice) {
-  // Clamp entry price to range
-  const p  = Math.max(lowerPrice, Math.min(upperPrice, entryPrice));
-  const pa = lowerPrice;
-  const pb = upperPrice;
-
-  // y fraction (quote token) = (sqrt(p) - sqrt(pa)) / (sqrt(pb) - sqrt(pa))
-  const sqrtP  = Math.sqrt(p);
-  const sqrtPa = Math.sqrt(pa);
-  const sqrtPb = Math.sqrt(pb);
-  const yFrac  = (sqrtP - sqrtPa) / (sqrtPb - sqrtPa);
-  const xFrac  = 1 - yFrac;
-
-  return {
-    xUsd: depositUsd * xFrac,
-    yUsd: depositUsd * yFrac,
-  };
-}
-
 // ─── Per-candle fee + IL update ───────────────────────────────────────────────
 
 /**
@@ -177,7 +151,7 @@ function computeInitialSplit(depositUsd, entryPrice, lowerPrice, upperPrice) {
  */
 function processCandle(candle, position) {
   const { low, high, close, volume } = candle;
-  const { lowerPrice, upperPrice, lpFeeFraction, avgExistingBinTvl, weights, lowerBinId, upperBinId, depositAmount, initialXUsd, initialYUsd, entryPrice, tokenYPrice } = position;
+  const { lowerPrice, upperPrice, lpFeeFraction, avgExistingBinTvl, weights, lowerBinId, upperBinId, depositAmount, entryPrice, tokenYPrice } = position;
 
   // ── Fee accrual ──
   // How much of the candle's price range overlaps our position range?
@@ -198,14 +172,21 @@ function processCandle(candle, position) {
 
     // Volume from Meteora OHLCV is in USD, convert to SOL.
     // avgExistingBinTvl is in USD (from d.tvl), convert to SOL using tokenYPrice.
-    // ourAvgBinDeposit is depositAmount / bins (in SOL).
+    // For non-uniform strategies (bid_ask, curve), bins with higher weight
+    // receive more deposit and earn a larger share of fees — iterate over
+    // all bins to compute the correct weighted-average TVL share.
     const solPrice           = tokenYPrice > 0 ? tokenYPrice : 1;
     const volumeValueSol     = solPrice > 0 ? volume / solPrice : 0;
     const volumeInRangeSol   = volumeValueSol * overlapFrac;
     const existingBinTvlSol  = avgExistingBinTvl / solPrice;
-    const ourAvgBinDeposit   = depositAmount / weights.length;
-    const totalAvgBinLiq     = existingBinTvlSol + ourAvgBinDeposit;
-    const avgTvlShare        = ourAvgBinDeposit / totalAvgBinLiq;
+
+    let totalWeightedShare = 0;
+    for (const w of weights) {
+      const ourDeposit  = depositAmount * w;
+      const totalBinLiq = existingBinTvlSol + ourDeposit;
+      totalWeightedShare += ourDeposit / totalBinLiq;
+    }
+    const avgTvlShare = totalWeightedShare / weights.length;
 
     feeEarned = volumeInRangeSol * lpFeeFraction * avgTvlShare;
   }
@@ -269,8 +250,6 @@ export async function openPaperPosition({
   const avgExistingBinTvl = tvl > 0 ? tvl / totalActiveBins : deposit_amount;
   const weights           = buildWeights(strategy_type, lowerBinId, upperBinId, activeBinId);
 
-  const { xUsd, yUsd } = computeInitialSplit(deposit_amount, normEntryPrice, normLowerPrice, normUpperPrice);
-
   const nowSec = Math.floor(Date.now() / 1000);
   const id     = `paper-${Date.now().toString(36)}`;
 
@@ -299,8 +278,6 @@ export async function openPaperPosition({
     price_scale:       priceScale,
     entry_timestamp:   nowSec,
     opened_at:         new Date().toISOString(),
-    initial_x_usd:     xUsd,
-    initial_y_usd:     yUsd,
 
     // accumulated (updated each tick)
     fees_earned:       0,
@@ -374,8 +351,6 @@ export async function tickPaperPositions() {
             lowerBinId:         pos.lower_bin_id,
             upperBinId:         pos.upper_bin_id,
             depositAmount:      pos.deposit_amount,
-            initialXUsd:        pos.initial_x_usd,
-            initialYUsd:        pos.initial_y_usd,
             entryPrice:         pos.entry_price,
             tokenYPrice:        freshTokenYPrice,
           });
