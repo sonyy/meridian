@@ -167,12 +167,25 @@ async function fetchNewCandles(poolAddress, fromTimestamp) {
 
 // ─── Liquidity distribution ───────────────────────────────────────────────────
 
-function buildWeights(strategyType, lowerBinId, upperBinId, activeBinId) {
+function buildWeights(strategyType, lowerBinId, upperBinId, activeBinId, singleSide) {
   const n      = upperBinId - lowerBinId + 1;
-  const center = activeBinId - lowerBinId;
   const sigma  = Math.max(n / 4, 1);
   const w      = Array.from({ length: n }, (_, i) => {
-    const d = i - center;
+    let d;
+    if (singleSide === "sol") {
+      // Single-side SOL: all bins below active price (bid side).
+      // Active bin is at the UPPER edge (nearest to current price).
+      // Weight HIGH far from active (deep discount) → LOW near active.
+      d = (n - 1) - i; // 0 at active edge, n-1 at far edge
+    } else if (singleSide === "token") {
+      // Single-side token: all bins above active price (ask side).
+      // Active bin is at the LOWER edge.
+      // Weight HIGH far from active → LOW near active.
+      d = i; // 0 at active edge, n-1 at far edge
+    } else {
+      const center = activeBinId - lowerBinId;
+      d = i - center;
+    }
     if (strategyType === "curve")   return Math.exp(-0.5 * (d / sigma) ** 2);
     if (strategyType === "bid_ask") return 1 - Math.exp(-0.5 * (d / sigma) ** 2) + 0.01;
     return 1; // spot
@@ -256,6 +269,7 @@ export async function openPaperPosition({
   lower_price,
   upper_price,
   strategy_type = "spot",
+  single_side,
 }) {
   const { getBinIdFromPrice } = await getDLMMHelpers();
   const poolCfg = await fetchPoolConfig(pool_address);
@@ -280,7 +294,7 @@ export async function openPaperPosition({
   const normEntryPrice = sdkMidPrice * priceScale; // ≈ currentPrice
 
   const numBins           = upperBinId - lowerBinId + 1;
-  const weights           = buildWeights(strategy_type, lowerBinId, upperBinId, activeBinId);
+  const weights           = buildWeights(strategy_type, lowerBinId, upperBinId, activeBinId, single_side);
   // Fetch real per-bin TVL from on-chain via SDK (once at open).
   // Falls back to heuristic (TVL/estimated-active-bins) if RPC fails.
   const realAvgTvl = await fetchRealBinTvl(
@@ -302,6 +316,7 @@ export async function openPaperPosition({
     lower_price,
     upper_price,
     strategy_type,
+    single_side:      single_side ?? null,
     bin_step:         binStep,
     lp_fee_fraction:  lpFeeFraction,
     lower_bin_id:     lowerBinId,
@@ -508,6 +523,7 @@ function formatSummary(pos) {
     pair:          pos.pair,
     status:        pos.status,
     strategy:      pos.strategy_type,
+    single_side:   pos.single_side ?? null,
     deposit:       pos.deposit_amount,
     range:         { lower: pos.lower_price, upper: pos.upper_price, scale: pos.price_scale ?? 1 },
     entry_price:   pos.entry_price,

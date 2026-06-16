@@ -393,14 +393,21 @@ app.get("/api/positions", async (req, res) => {
 });
 
 // ── Bin weight recomputation (stored weights may be stale from older code) ──
-function rebuildWeights(strategy, lowerBinId, upperBinId) {
+function rebuildWeights(strategy, lowerBinId, upperBinId, singleSide) {
   if (strategy !== "bid_ask" && strategy !== "curve") return null; // spot = uniform
   const n = upperBinId - lowerBinId + 1;
   if (n <= 0 || n > 500) return null;
-  const center = Math.floor(n / 2);
   const sigma = Math.max(n / 4, 1);
   const w = Array.from({ length: n }, (_, i) => {
-    const d = i - center;
+    let d;
+    if (singleSide === "sol") {
+      d = (n - 1) - i;
+    } else if (singleSide === "token") {
+      d = i;
+    } else {
+      const center = Math.floor(n / 2);
+      d = i - center;
+    }
     if (strategy === "curve")   return Math.exp(-0.5 * (d / sigma) ** 2);
     if (strategy === "bid_ask") return 1 - Math.exp(-0.5 * (d / sigma) ** 2) + 0.01;
     return 1;
@@ -471,7 +478,7 @@ function enrich(paperPos, trackedMap, status) {
     bin_volumes: paperPos.deposit > 0 && paperPos.lower_bin_id != null && paperPos.upper_bin_id != null
       ? (() => {
           const w = paperPos.strategy === "bid_ask" || paperPos.strategy === "curve"
-            ? rebuildWeights(paperPos.strategy, paperPos.lower_bin_id, paperPos.upper_bin_id)
+            ? rebuildWeights(paperPos.strategy, paperPos.lower_bin_id, paperPos.upper_bin_id, paperPos.single_side)
             : null;
           const weights = w ?? (paperPos.weights?.length > 0 ? paperPos.weights : null);
           if (!weights) return null;

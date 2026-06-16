@@ -130,6 +130,9 @@ export async function virtualDeployPosition(args) {
     args.deposit_amount ?? args.amount_y ?? args.amount_sol ?? 0;
 
   const strategy_type = args.strategy_type || args.strategy || "bid_ask";
+  const single_side    = args.single_side
+    || (args.bins_above === 0 && (args.bins_below ?? 0) > 0 ? "sol" : null)
+    || (args.amount_x === 0 && (args.amount_y ?? 0) > 0 ? "sol" : null);
 
   // Check wallet first
   if (wallet.sol < deposit_amount + 0.01) {
@@ -186,6 +189,7 @@ export async function virtualDeployPosition(args) {
       lower_price,
       upper_price,
       strategy_type,
+      single_side,
     });
 
     // Deduct from virtual wallet
