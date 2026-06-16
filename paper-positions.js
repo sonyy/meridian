@@ -210,8 +210,10 @@ function processCandle(candle, position) {
   const effectivePrice = Math.max(lowerPrice, Math.min(upperPrice, close));
   const r = entryPrice > 0 ? effectivePrice / entryPrice : 1;
   const ilPct = r > 0 ? (2 * Math.sqrt(r)) / (1 + r) - 1 : 0;
-  // Amplify for concentrated liquidity: IL is higher in a narrow range
-  const rangeWidth = upperPrice > lowerPrice ? Math.sqrt(upperPrice / lowerPrice) : 1;
+  // Amplify for concentrated liquidity: IL is higher in a narrow range.
+  // Narrow range (±5%): sqrt((1.05+0.95)/(1.05-0.95)) = sqrt(20) ≈ 4.47 → 4.5x IL
+  // Wide range (4x):     sqrt((2+0.5)/(2-0.5))     = sqrt(1.67) ≈ 1.29 → ~1.3x IL
+  const rangeWidth = upperPrice > lowerPrice ? Math.sqrt((upperPrice + lowerPrice) / (upperPrice - lowerPrice)) : 1;
   const ilUsd = depositAmount * ilPct * rangeWidth;
 
   return { feeEarned, ilUsd, currentPrice: close, inRange: overlapHigh > overlapLow };
