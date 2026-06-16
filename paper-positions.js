@@ -171,16 +171,25 @@ function buildWeights(strategyType, lowerBinId, upperBinId, activeBinId, singleS
   const n      = upperBinId - lowerBinId + 1;
   const sigma  = Math.max(n / 4, 1);
   const w      = Array.from({ length: n }, (_, i) => {
-    if (singleSide) {
-      // Right triangle: weight ⬆ linearly with distance from active edge.
+    if (singleSide && strategyType === "bid_ask") {
+      // Single-side bid_ask: right triangle.
+      // Weight ⬆ linearly with distance from active bin edge.
       const d = singleSide === "sol" ? (n - 1) - i : i;
-      return d + 1; // 1 at active edge (tip), n at far edge (base)
+      return d + 1;
     }
+    if (singleSide && strategyType === "curve") {
+      // Single-side curve: truncated Gaussian at active edge.
+      const d = singleSide === "sol" ? (n - 1) - i : i;
+      return Math.exp(-0.5 * (d / sigma) ** 2);
+    }
+    // spot (incl. single-side): uniform across all bins
+    if (strategyType === "spot") return 1;
+    // Full-range (non-single-side) bid_ask / curve
     const center = activeBinId - lowerBinId;
     const d = i - center;
     if (strategyType === "curve")   return Math.exp(-0.5 * (d / sigma) ** 2);
     if (strategyType === "bid_ask") return 1 - Math.exp(-0.5 * (d / sigma) ** 2) + 0.01;
-    return 1; // spot
+    return 1; // fallback
   });
   const total = w.reduce((s, v) => s + v, 0);
   return w.map((v) => v / total);
