@@ -187,8 +187,14 @@ function processCandle(candle, position) {
   const overlapHigh = Math.min(candleHigh, upperPrice);
 
   let feeEarned = 0;
+  const isDegenerate = candleHigh <= candleLow + 1e-12;
   if (overlapHigh >= overlapLow) {
-    const overlapFrac = (overlapHigh - overlapLow) / Math.max(candleHigh - candleLow, 1e-12);
+    // Meteora OHLCV API often returns candles where low == high == close.
+    // For these degenerate candles, the normal overlapFrac calculation
+    // (overlapHigh - overlapLow) / (candleHigh - candleLow) would give 0/1e-12 = 0,
+    // incorrectly skipping fee collection even when the price is in range with volume.
+    // Fix: if degenerate and close is in range, assume full overlap.
+    const overlapFrac = isDegenerate ? 1 : (overlapHigh - overlapLow) / Math.max(candleHigh - candleLow, 1e-12);
 
     // Volume from Meteora OHLCV is in USD, convert to SOL.
     // avgExistingBinTvl is in USD (from d.tvl), convert to SOL using tokenYPrice.
@@ -216,7 +222,9 @@ function processCandle(candle, position) {
   const rangeWidth = upperPrice > lowerPrice ? Math.sqrt((upperPrice + lowerPrice) / (upperPrice - lowerPrice)) : 1;
   const ilUsd = depositAmount * ilPct * rangeWidth;
 
-  return { feeEarned, ilUsd, currentPrice: close, inRange: overlapHigh > overlapLow };
+  // Degenerate candle (low==high==close): count as in-range if close is within position bounds
+  const inRange = overlapHigh > overlapLow || (isDegenerate && overlapHigh >= overlapLow);
+  return { feeEarned, ilUsd, currentPrice: close, inRange };
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
