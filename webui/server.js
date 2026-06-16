@@ -399,15 +399,12 @@ function rebuildWeights(strategy, lowerBinId, upperBinId, singleSide) {
   if (n <= 0 || n > 500) return null;
   const sigma = Math.max(n / 4, 1);
   const w = Array.from({ length: n }, (_, i) => {
-    let d;
-    if (singleSide === "sol") {
-      d = (n - 1) - i;
-    } else if (singleSide === "token") {
-      d = i;
-    } else {
-      const center = Math.floor(n / 2);
-      d = i - center;
+    if (singleSide) {
+      const d = singleSide === "sol" ? (n - 1) - i : i;
+      return d + 1; // right triangle: 1 at active edge, n at far edge
     }
+    const center = Math.floor(n / 2);
+    const d = i - center;
     if (strategy === "curve")   return Math.exp(-0.5 * (d / sigma) ** 2);
     if (strategy === "bid_ask") return 1 - Math.exp(-0.5 * (d / sigma) ** 2) + 0.01;
     return 1;

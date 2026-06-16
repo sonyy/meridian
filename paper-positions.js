@@ -171,21 +171,13 @@ function buildWeights(strategyType, lowerBinId, upperBinId, activeBinId, singleS
   const n      = upperBinId - lowerBinId + 1;
   const sigma  = Math.max(n / 4, 1);
   const w      = Array.from({ length: n }, (_, i) => {
-    let d;
-    if (singleSide === "sol") {
-      // Single-side SOL: all bins below active price (bid side).
-      // Active bin is at the UPPER edge (nearest to current price).
-      // Weight HIGH far from active (deep discount) → LOW near active.
-      d = (n - 1) - i; // 0 at active edge, n-1 at far edge
-    } else if (singleSide === "token") {
-      // Single-side token: all bins above active price (ask side).
-      // Active bin is at the LOWER edge.
-      // Weight HIGH far from active → LOW near active.
-      d = i; // 0 at active edge, n-1 at far edge
-    } else {
-      const center = activeBinId - lowerBinId;
-      d = i - center;
+    if (singleSide) {
+      // Right triangle: weight ⬆ linearly with distance from active edge.
+      const d = singleSide === "sol" ? (n - 1) - i : i;
+      return d + 1; // 1 at active edge (tip), n at far edge (base)
     }
+    const center = activeBinId - lowerBinId;
+    const d = i - center;
     if (strategyType === "curve")   return Math.exp(-0.5 * (d / sigma) ** 2);
     if (strategyType === "bid_ask") return 1 - Math.exp(-0.5 * (d / sigma) ** 2) + 0.01;
     return 1; // spot
