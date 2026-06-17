@@ -240,31 +240,45 @@ function fmtSol(v) {
   if (Math.abs(v) >= 1e-9) return v.toExponential(2);
   return '0';
 }
+const EXIT_LABELS = {
+  oor_above:     'OOR above ↑',
+  oor_below:     'OOR below ↓',
+  oor:           'OOR',
+  stop_loss:     'Stop Loss',
+  trailing_tp:   'Trailing TP',
+  take_profit:   'Take Profit',
+  low_yield:     'Low Yield',
+  rug_guard:     'Rug Guard',
+  volatility_drop: 'Volatility Drop',
+  agent_decision:  'Agent Decision',
+};
 function fmtExitReason(p) {
   // Try canonical exit_reason first
   const er = p.exit_reason || '';
   if (er) {
-    if (er === 'oor_above') return 'OOR above ↑';
-    if (er === 'oor_below') return 'OOR below ↓';
-    if (er === 'oor') return 'OOR';
-    if (er === 'stop_loss') return 'Stop Loss';
-    if (er === 'trailing_tp') return 'Trailing TP';
-    if (er === 'take_profit') return 'Take Profit';
-    if (er === 'low_yield') return 'Low Yield';
-    if (er === 'rug_guard') return 'Rug Guard';
-    if (er === 'volatility_drop') return 'Volatility Drop';
-    if (er === 'agent_decision') return 'Agent Decision';
+    const label = EXIT_LABELS[er];
+    if (label) return label;
     return er;
   }
-  // Fallback: free-text close_reason
+  // Fallback: free-text close_reason — keyword match
   const r = (p.close_reason || '').toLowerCase();
   if (!r) return '-';
-  if (r.includes('above') || r.includes('below')) return p.close_reason;
   if (r.includes('oor') || r.includes('out of range')) {
     if (p.last_price != null && p.range_upper != null && p.last_price > p.range_upper) return 'OOR above ↑';
     if (p.last_price != null && p.range_lower != null && p.last_price < p.range_lower) return 'OOR below ↓';
+    return 'OOR';
   }
-  return p.close_reason;
+  if (r.includes('trailing')) return 'Trailing TP';
+  if (r.includes('stop loss') || r.includes('stop_loss')) return 'Stop Loss';
+  if (r.includes('low yield') || r.includes('low_yield')) return 'Low Yield';
+  if (r.includes('take profit') || r.includes('take_profit') || r.includes('rule 2')) return 'Take Profit';
+  if (r.includes('rug')) return 'Rug Guard';
+  if (r.includes('volatility')) return 'Volatility Drop';
+  if (r.includes('agent')) return 'Agent Decision';
+  // Unknown — show short label (first segment before dash)
+  const short = (p.close_reason || '').split(/[—–]/)[0].trim();
+  if (short.length < 45) return short;
+  return short.slice(0, 42) + '...';
 }
 let charts = new Map();  // positionId → Chart instance
 
