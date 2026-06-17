@@ -325,19 +325,17 @@ app.get("/api/positions", async (req, res) => {
     const totalPnl = closed.reduce((s, p) => s + (p.net_pnl || 0), 0) + openUnrealizedPnl;
     const totalFees = closed.reduce((s, p) => s + (p.fees_earned || 0), 0) + open.reduce((s, p) => s + (p.fees_earned || 0), 0);
     const totalDeployed = closed.reduce((s, p) => s + (p.deposit || 0), 0) + open.reduce((s, p) => s + (p.deposit || 0), 0);
+    const netPnlPct = wallet.initial_sol > 0 ? +((fmtSol(totalPnl) / wallet.initial_sol) * 100).toFixed(2) : 0;
     const openDeployed = open.reduce((s, p) => s + (p.deposit || 0), 0);
     const closedDeployed = closed.reduce((s, p) => s + (p.deposit || 0), 0);
     const winCount = closed.filter((p) => (p.net_pnl ?? 0) > 0).length;
     const lossCount = closed.filter((p) => (p.net_pnl ?? 0) < 0).length;
     const breakEvenCount = closed.length - winCount - lossCount;
 
-    // Dynamic SOL formatting: show enough decimals for small values
     function fmtSol(v) {
       const a = Math.abs(v);
-      if (a < 0.0001) return 0;
-      if (a < 0.01) return +v.toFixed(4);
-      if (a < 1) return +v.toFixed(3);
-      return +v.toFixed(2);
+      if (a < 0.00005) return 0;
+      return +v.toFixed(4);
     }
 
     res.json({
@@ -349,6 +347,8 @@ app.get("/api/positions", async (req, res) => {
         open_deployed_sol: +openDeployed.toFixed(2),
         closed_deployed_sol: +closedDeployed.toFixed(2),
         total_pnl_sol: fmtSol(totalPnl),
+        net_pnl_pct: netPnlPct,
+        unrealized_pnl_sol: fmtSol(openUnrealizedPnl),
         total_fees_sol: fmtSol(totalFees),
         win_rate: (winCount + lossCount) > 0 ? +((winCount / (winCount + lossCount)) * 100).toFixed(1) : 0,
         wins: winCount,
@@ -475,6 +475,7 @@ function enrich(paperPos, trackedMap, status) {
       }
       return null;
     })(),
+    exit_reason: t?.exit_reason ?? null,
     // bin distribution for chart overlay — recompute weights from strategy+bin_ids
     bin_volumes: paperPos.deposit > 0 && paperPos.lower_bin_id != null && paperPos.upper_bin_id != null
       ? (() => {

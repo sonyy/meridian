@@ -38,13 +38,23 @@ function save(data) {
   fs.writeFileSync(POOL_MEMORY_FILE, JSON.stringify(data, null, 2));
 }
 
-function isOorCloseReason(reason) {
-  const text = String(reason || "").trim().toLowerCase();
+/**
+ * Check if a deploy's close is an OOR exit.
+ * Uses exit_reason first (canonical), falls back to close_reason text match.
+ */
+function isOorCloseReason(deploy) {
+  if (deploy.exit_reason === "oor" || deploy.exit_reason === "oor_above" || deploy.exit_reason === "oor_below") return true;
+  const text = String(deploy.close_reason || "").trim().toLowerCase();
   return text === "oor" || text.includes("out of range") || text.includes("oor");
 }
 
-function isAdjustedWinRateExcludedReason(reason) {
-  const text = String(reason || "").trim().toLowerCase();
+/**
+ * Check if a deploy's close should be excluded from adjusted win rate.
+ * OOR exits are excluded because they reflect range mechanics, not capital loss.
+ */
+function isAdjustedWinRateExcludedReason(deploy) {
+  if (deploy.exit_reason === "oor" || deploy.exit_reason === "oor_above" || deploy.exit_reason === "oor_below") return true;
+  const text = String(deploy.close_reason || "").trim().toLowerCase();
   return text.includes("out of range") ||
     text.includes("pumped far above range") ||
     text === "oor" ||
@@ -134,6 +144,7 @@ export function recordPoolDeploy(poolAddress, deployData) {
     range_efficiency: deployData.range_efficiency ?? null,
     minutes_held: deployData.minutes_held ?? null,
     close_reason: deployData.close_reason || null,
+    exit_reason: deployData.exit_reason || null,
     strategy: deployData.strategy || null,
     volatility_at_deploy: deployData.volatility ?? null,
     entry_mcap: deployData.entry_mcap ?? null,
@@ -159,7 +170,7 @@ export function recordPoolDeploy(poolAddress, deployData) {
       (withPnl.filter((d) => d.pnl_pct >= 0).length / withPnl.length) * 100
     ) / 100;
   }
-  const adjusted = withPnl.filter((d) => !isAdjustedWinRateExcludedReason(d.close_reason));
+  const adjusted = withPnl.filter((d) => !isAdjustedWinRateExcludedReason(d));
   entry.adjusted_win_rate_sample_count = adjusted.length;
   entry.adjusted_win_rate = adjusted.length > 0
     ? Math.round((adjusted.filter((d) => d.pnl_pct >= 0).length / adjusted.length) * 10000) / 100
@@ -170,14 +181,14 @@ export function recordPoolDeploy(poolAddress, deployData) {
   }
 
   // Set cooldown for low yield closes — pool wasn't profitable enough, don't redeploy soon
-  if (deploy.close_reason === "low yield") {
+  if (deploy.exit_reason === "low_yield" || deploy.close_reason === "low yield") {
     const cooldownHours = 4;
     const cooldownUntil = setPoolCooldown(entry, cooldownHours, "low yield");
     log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (low yield close)`);
   }
 
   // Set cooldown for stop-loss closes — negative outcome, avoid immediate redeploy
-  if (deploy.close_reason && (deploy.close_reason.toLowerCase().includes("stop loss") || deploy.close_reason.toLowerCase().includes("stop_loss"))) {
+  if (deploy.exit_reason === "stop_loss" || (deploy.close_reason && (deploy.close_reason.toLowerCase().includes("stop loss") || deploy.close_reason.toLowerCase().includes("stop_loss")))) {
     const cooldownHours = config.management.stopLossCooldownHours ?? 2;
     const reason = "stop loss close";
     const poolCooldownUntil = setPoolCooldown(entry, cooldownHours, reason);
@@ -205,7 +216,7 @@ export function recordPoolDeploy(poolAddress, deployData) {
   const recentDeploys = entry.deploys.slice(-oorTriggerCount);
   const repeatedOorCloses =
     recentDeploys.length >= oorTriggerCount &&
-    recentDeploys.every((d) => isOorCloseReason(d.close_reason));
+    recentDeploys.every((d) => isOorCloseReason(d));
 
   if (repeatedOorCloses) {
     const reason = `repeated OOR closes (${oorTriggerCount}x)`;

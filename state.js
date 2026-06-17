@@ -114,6 +114,7 @@ export function trackPosition({
     confirmed_trailing_exit_reason: null,
     confirmed_trailing_exit_until: null,
     trailing_active: false,
+    exit_reason: null,
   };
   pushEvent(state, { action: "deploy", position, pool_name: pool_name || pool });
   save(state);
@@ -199,6 +200,14 @@ export function recordClose(position_address, reason) {
   log("state", `Position ${position_address} marked closed: ${reason}`);
 }
 
+export function clearExitReason(position_address) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return;
+  pos.exit_reason = null;
+  save(state);
+}
+
 /**
  * Record a rebalance (close + redeploy).
  */
@@ -229,6 +238,21 @@ export function setPositionInstruction(position_address, instruction) {
   pos.instruction = sanitizeStoredText(instruction);
   save(state);
   log("state", `Position ${position_address} instruction set: ${pos.instruction}`);
+  return true;
+}
+
+/**
+ * Set the canonical exit reason on a position (stored for downstream use
+ * so pool-memory / lessons / hivemind don't need to parse free-text close_reason).
+ * null clears it.
+ */
+export function setExitReason(position_address, exitReason) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return false;
+  pos.exit_reason = exitReason || null;
+  save(state);
+  log("state", `Position ${position_address} exit_reason set: ${exitReason}`);
   return true;
 }
 
@@ -398,6 +422,30 @@ export function getStateSummary() {
  * @param {object} mgmtConfig
  * Returns { action, reason } or null if no exit needed.
  */
+/**
+ * Determine OOR direction from positionData.
+ */
+function oorDirection(positionData) {
+  const { active_bin, lower_bin, upper_bin } = positionData;
+  if (active_bin != null && upper_bin != null && active_bin > upper_bin) return "oor_above";
+  if (active_bin != null && lower_bin != null && active_bin < lower_bin) return "oor_below";
+  return "oor";
+}
+
+/**
+ * Canonical exit_reason for each action.
+ */
+function actionToExitReason(action, positionData) {
+  switch (action) {
+    case "RUG_GUARD":    return "rug_guard";
+    case "STOP_LOSS":    return "stop_loss";
+    case "TRAILING_TP":  return "trailing_tp";
+    case "OUT_OF_RANGE": return oorDirection(positionData);
+    case "LOW_YIELD":    return "low_yield";
+    default:             return "agent_decision";
+  }
+}
+
 export function updatePnlAndCheckExits(position_address, positionData, mgmtConfig) {
   const { pnl_pct: currentPnlPct, pnl_pct_suspicious, in_range, fee_per_tvl_24h } = positionData;
   const state = load();
@@ -410,7 +458,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
       pos.confirmed_trailing_exit_reason = null;
       pos.confirmed_trailing_exit_until = null;
       save(state);
-      return { action: "TRAILING_TP", reason, confirmed_recheck: true };
+      return { action: "TRAILING_TP", exit_reason: "trailing_tp", reason, confirmed_recheck: true };
     }
     pos.confirmed_trailing_exit_reason = null;
     pos.confirmed_trailing_exit_until = null;
@@ -447,6 +495,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     if (dropFromPeak <= -rugGuardDropPct) {
       return {
         action: "RUG_GUARD",
+        exit_reason: "rug_guard",
         reason: `Rug guard: dropped ${Math.abs(dropFromPeak).toFixed(1)}% from peak (${pos.peak_pnl_pct.toFixed(1)}% → ${currentPnlPct.toFixed(1)}%) ≥ ${rugGuardDropPct}%`,
       };
     }
@@ -456,6 +505,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct <= mgmtConfig.stopLossPct) {
     return {
       action: "STOP_LOSS",
+      exit_reason: "stop_loss",
       reason: `Stop loss: PnL ${currentPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%`,
     };
   }
@@ -466,6 +516,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     if (dropFromPeak >= mgmtConfig.trailingDropPct) {
       return {
         action: "TRAILING_TP",
+        exit_reason: "trailing_tp",
         reason: `Trailing TP: peak ${pos.peak_pnl_pct.toFixed(2)}% → current ${currentPnlPct.toFixed(2)}% (dropped ${dropFromPeak.toFixed(2)}% >= ${mgmtConfig.trailingDropPct}%)`,
         needs_confirmation: true,
         peak_pnl_pct: pos.peak_pnl_pct,
@@ -481,6 +532,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     if (minutesOOR >= mgmtConfig.outOfRangeWaitMinutes) {
       return {
         action: "OUT_OF_RANGE",
+        exit_reason: oorDirection(positionData),
         reason: `Out of range for ${minutesOOR}m (limit: ${mgmtConfig.outOfRangeWaitMinutes}m)`,
       };
     }
@@ -497,6 +549,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   ) {
     return {
       action: "LOW_YIELD",
+      exit_reason: "low_yield",
       reason: `Low yield: fee/TVL ${fee_per_tvl_24h.toFixed(2)}% < min ${mgmtConfig.minFeePerTvl24h}% (age: ${age_minutes ?? "?"}m)`,
     };
   }

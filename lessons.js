@@ -121,12 +121,13 @@ export async function recordPerformance(perf) {
     ? (perf.minutes_in_range / perf.minutes_held) * 100
     : 0;
 
+  const exitReason = perf.exit_reason || null;
   const closeReasonText = String(perf.close_reason || "").toLowerCase();
   const suspiciousAbsurdClosedPnl =
     Number.isFinite(pnl_pct) &&
     perf.initial_value_usd >= 20 &&
     pnl_pct <= -90 &&
-    !closeReasonText.includes("stop loss");
+    exitReason !== "stop_loss" && !closeReasonText.includes("stop loss");
 
   if (suspiciousAbsurdClosedPnl) {
     log("lessons_warn", `Skipped absurd closed PnL record for ${perf.pool_name || perf.pool}: pnl_pct=${pnl_pct.toFixed(2)} reason=${perf.close_reason}`);
@@ -173,6 +174,7 @@ export async function recordPerformance(perf) {
       fees_earned_sol: perf.fees_earned_sol,
       fee_earned_pct: perf.initial_value_usd > 0 ? ((perf.fees_earned_usd || 0) / perf.initial_value_usd) * 100 : null,
       close_reason: perf.close_reason,
+      exit_reason: perf.exit_reason || null,
       strategy: perf.strategy,
       volatility: perf.volatility,
       entry_mcap: perf.entry_mcap,
@@ -274,17 +276,18 @@ function derivLesson(perf) {
 
   if (!rule) return null;
 
+  const exitReason = perf.exit_reason || null;
   const closeReasonText = String(perf.close_reason || "").toLowerCase();
   const positiveEvidence =
     feeYieldPct >= 1 ||
     (perf.fees_earned_usd || 0) >= 3 ||
     perf.pnl_pct >= 3;
+  const isOorExit = exitReason === "oor" || exitReason === "oor_above" || exitReason === "oor_below" || closeReasonText.includes("out of range") || closeReasonText.includes("oor");
   const negativeEvidence =
     perf.pnl_pct <= -5 ||
     perf.range_efficiency <= 30 ||
-    closeReasonText.includes("out of range") ||
-    closeReasonText.includes("oor") ||
-    closeReasonText.includes("low yield") ||
+    isOorExit ||
+    exitReason === "low_yield" || closeReasonText.includes("low yield") ||
     closeReasonText.includes("volume");
 
   let confidence = 0.35;
@@ -719,6 +722,7 @@ export function getPerformanceHistory({ hours = 24, limit = 50 } = {}) {
       range_efficiency: r.range_efficiency,
       minutes_held: r.minutes_held,
       close_reason: r.close_reason,
+      exit_reason: r.exit_reason || null,
       closed_at: r.recorded_at,
     }));
 

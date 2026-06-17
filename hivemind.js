@@ -323,7 +323,12 @@ export async function pushHiveLesson(lesson) {
   }
 }
 
-export function shouldCountInAdjustedWinRate(closeReason) {
+/**
+ * @param {string} [exitReason] - Canonical exit_reason tag
+ * @param {string} [closeReason] - Free-text close_reason (fallback)
+ */
+export function shouldCountInAdjustedWinRate(exitReason, closeReason) {
+  if (exitReason === "oor" || exitReason === "oor_above" || exitReason === "oor_below") return false;
   const text = String(closeReason || "").toLowerCase();
   return !(
     text.includes("out of range") ||
@@ -354,7 +359,7 @@ export async function pushHivePerformanceEvent(perf) {
           feesUsd: Number(perf.fees_earned_usd || 0),
           feesSol: Number(perf.fees_earned_sol || 0),
           minutesHeld: Number(perf.minutes_held || 0),
-          countInAdjustedWinRate: shouldCountInAdjustedWinRate(perf.close_reason),
+          countInAdjustedWinRate: shouldCountInAdjustedWinRate(perf.exit_reason, perf.close_reason),
           market: buildMarketFields(perf),
         },
       },

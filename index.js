@@ -28,7 +28,7 @@ import {
 import { generateBriefing } from "./briefing.js";
 import { tickPaperPositions, listPaperPositions } from "./paper-positions.js";
 import { isVirtualMode, getVirtualStatus, tickVirtualPositions, getVirtualPositionsAsReal, getVirtualWallet, virtualDeployPosition } from "./virtual-engine.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setExitReason, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
@@ -404,8 +404,9 @@ No open positions. Triggering screening cycle.`).catch(() => {});
           }
           continue;
         }
-        exitMap.set(p.position, exit.reason);
-        log("state", `Exit alert for ${p.pair}: ${exit.reason}`);
+        if (exit.exit_reason) setExitReason(p.position, exit.exit_reason);
+        exitMap.set(p.position, { reason: exit.reason, exit_reason: exit.exit_reason });
+        log("state", `Exit alert for ${p.pair}: ${exit.reason} [exit_reason=${exit.exit_reason}]`);
       }
     }
 
@@ -415,7 +416,8 @@ No open positions. Triggering screening cycle.`).catch(() => {});
     for (const p of positionData) {
       // Hard exit — highest priority
       if (exitMap.has(p.position)) {
-        actionMap.set(p.position, { action: "CLOSE", rule: "exit", reason: exitMap.get(p.position) });
+        const exit = exitMap.get(p.position);
+        actionMap.set(p.position, { action: "CLOSE", rule: "exit", reason: exit.reason });
         continue;
       }
       // Instruction-set — pass to LLM, can't parse in JS
@@ -426,6 +428,7 @@ No open positions. Triggering screening cycle.`).catch(() => {});
 
       const closeRule = getDeterministicCloseRule(p, config.management);
       if (closeRule) {
+        if (closeRule.exit_reason) setExitReason(p.position, closeRule.exit_reason);
         actionMap.set(p.position, closeRule);
         continue;
       }
@@ -1054,12 +1057,13 @@ Summarize the current portfolio health, total fees earned, and performance of al
             }
             continue;
           }
+          if (exit.exit_reason) setExitReason(p.position, exit.exit_reason);
           const isImmediate = exit.action === "STOP_LOSS" || exit.action === "RUG_GUARD";
           const cooldownMs = config.schedule.managementIntervalMin * 60 * 1000;
           const sinceLastTrigger = Date.now() - _pollTriggeredAt;
           if (isImmediate || sinceLastTrigger >= cooldownMs) {
             _pollTriggeredAt = Date.now();
-            log("state", `[PnL poll] Exit alert: ${p.pair} — ${exit.reason}${isImmediate ? " [IMMEDIATE]" : ""} — triggering management`);
+            log("state", `[PnL poll] Exit alert: ${p.pair} — ${exit.reason} [exit_reason=${exit.exit_reason}]${isImmediate ? " [IMMEDIATE]" : ""} — triggering management`);
             runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Poll-triggered management failed: ${e.message}`));
           } else {
             log("state", `[PnL poll] Exit alert: ${p.pair} — ${exit.reason} — cooldown (${Math.round((cooldownMs - sinceLastTrigger) / 1000)}s left)`);
@@ -1068,6 +1072,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
         }
         const closeRule = getDeterministicCloseRule(p, config.management);
         if (closeRule) {
+          if (closeRule.exit_reason) setExitReason(p.position, closeRule.exit_reason);
           const isImmediate = closeRule.rule === 1;
           const cooldownMs = config.schedule.managementIntervalMin * 60 * 1000;
           const sinceLastTrigger = Date.now() - _pollTriggeredAt;
@@ -1173,29 +1178,29 @@ function getDeterministicCloseRule(position, managementConfig) {
   })();
 
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct) {
-    return { action: "CLOSE", rule: 1, reason: "stop loss" };
+    return { action: "CLOSE", rule: 1, reason: "stop loss", exit_reason: "stop_loss" };
   }
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
-    return { action: "CLOSE", rule: 2, reason: "take profit" };
+    return { action: "CLOSE", rule: 2, reason: "take profit", exit_reason: "take_profit" };
   }
   if (
     (position.active_bin != null && position.upper_bin != null && position.active_bin > position.upper_bin + managementConfig.outOfRangeBinsToClose) ||
     (position._is_virtual && position.in_range === false && position.upper_price != null && position.last_price != null && position.last_price > position.upper_price * 1.5)
   ) {
-    return { action: "CLOSE", rule: 3, reason: "pumped far above range" };
+    return { action: "CLOSE", rule: 3, reason: "pumped far above range", exit_reason: "oor_above" };
   }
   if (
     (position.active_bin != null && position.upper_bin != null && position.active_bin > position.upper_bin && (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangeWaitMinutes) ||
     (position._is_virtual && position.in_range === false && (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangeWaitMinutes)
   ) {
-    return { action: "CLOSE", rule: 4, reason: "OOR" };
+    return { action: "CLOSE", rule: 4, reason: "OOR", exit_reason: "oor_above" };
   }
   if (
     position.fee_per_tvl_24h != null &&
     position.fee_per_tvl_24h < managementConfig.minFeePerTvl24h &&
     (position.age_minutes ?? 0) >= 60
   ) {
-    return { action: "CLOSE", rule: 5, reason: "low yield" };
+    return { action: "CLOSE", rule: 5, reason: "low yield", exit_reason: "low_yield" };
   }
   // Rule 6: Volatility drop — if volatility has dropped significantly since deploy
   if (managementConfig.volatilityCheckEnabled && position.current_volatility != null) {
@@ -1208,6 +1213,7 @@ function getDeterministicCloseRule(position, managementConfig) {
           action: "CLOSE",
           rule: 6,
           reason: `volatility dropped ${dropPct.toFixed(0)}% (from ${deployVolatility} to ${position.current_volatility}) since deploy`,
+          exit_reason: "volatility_drop",
         };
       }
     }

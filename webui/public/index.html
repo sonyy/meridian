@@ -241,11 +241,25 @@ function fmtSol(v) {
   return '0';
 }
 function fmtExitReason(p) {
+  // Try canonical exit_reason first
+  const er = p.exit_reason || '';
+  if (er) {
+    if (er === 'oor_above') return 'OOR above ↑';
+    if (er === 'oor_below') return 'OOR below ↓';
+    if (er === 'oor') return 'OOR';
+    if (er === 'stop_loss') return 'Stop Loss';
+    if (er === 'trailing_tp') return 'Trailing TP';
+    if (er === 'take_profit') return 'Take Profit';
+    if (er === 'low_yield') return 'Low Yield';
+    if (er === 'rug_guard') return 'Rug Guard';
+    if (er === 'volatility_drop') return 'Volatility Drop';
+    if (er === 'agent_decision') return 'Agent Decision';
+    return er;
+  }
+  // Fallback: free-text close_reason
   const r = (p.close_reason || '').toLowerCase();
   if (!r) return '-';
-  // Already has direction
   if (r.includes('above') || r.includes('below')) return p.close_reason;
-  // Detect OOR and differentiate
   if (r.includes('oor') || r.includes('out of range')) {
     if (p.last_price != null && p.range_upper != null && p.last_price > p.range_upper) return 'OOR above ↑';
     if (p.last_price != null && p.range_lower != null && p.last_price < p.range_lower) return 'OOR below ↓';
@@ -345,17 +359,17 @@ function render(d) {
   document.getElementById('summary').innerHTML = `
     <div class="summary-card">
       <div class="label">Wallet</div>
-      <div class="value">${(d.wallet.sol + s.open_deployed_sol).toFixed(4)} <span style="font-size:12px;color:var(--text2)">SOL</span></div>
-      <div class="sub">saldo ${d.wallet.sol.toFixed(4)} + deployed ${s.open_deployed_sol.toFixed(2)}</div>
+      <div class="value">${(d.wallet.sol + s.open_deployed_sol + s.unrealized_pnl_sol).toFixed(4)} <span style="font-size:12px;color:var(--text2)">SOL</span></div>
+      <div class="sub">saldo ${d.wallet.sol.toFixed(4)} + deployed ${s.open_deployed_sol.toFixed(4)} + unrealized ${s.unrealized_pnl_sol.toFixed(4)} · initial ${d.wallet.initial_sol.toFixed(4)} SOL</div>
     </div>
     <div class="summary-card">
       <div class="label">Open / Closed</div>
       <div class="value">${s.open_count} / ${s.closed_count}</div>
     </div>
     <div class="summary-card">
-      <div class="label">Total PnL</div>
-      <div class="value ${s.total_pnl_sol > 0 ? 'green' : s.total_pnl_sol < 0 ? 'red' : ''}">${s.total_pnl_sol > 0 ? '+' : ''}${s.total_pnl_sol === 0 ? '0' : s.total_pnl_sol} <span style="font-size:12px;color:var(--text2)">SOL</span></div>
-      <div class="sub">fees: ${s.total_fees_sol} SOL</div>
+      <div class="label">PnL</div>
+      <div class="value ${s.total_pnl_sol > 0 ? 'green' : s.total_pnl_sol < 0 ? 'red' : ''}">${s.total_pnl_sol > 0 ? '+' : ''}${s.total_pnl_sol === 0 ? '0' : s.total_pnl_sol} <span style="font-size:12px;color:var(--text2)">SOL</span> <span style="font-size:14px;${s.net_pnl_pct > 0 ? 'color:#4ade80' : s.net_pnl_pct < 0 ? 'color:#ff4444' : ''}">(${s.net_pnl_pct > 0 ? '+' : ''}${s.net_pnl_pct}%)</span></div>
+      <div class="sub">unrealized: ${s.unrealized_pnl_sol > 0 ? '+' : ''}${s.unrealized_pnl_sol === 0 ? '0' : s.unrealized_pnl_sol} SOL · fees: ${s.total_fees_sol} SOL</div>
     </div>
     <div class="summary-card">
       <div class="label">Win Rate</div>
@@ -448,7 +462,7 @@ function render(d) {
               <td>${fmtSol(p.fees_earned)} SOL</td>
               <td style="color:${(p.il_usd||0) < 0 ? 'var(--red)' : 'var(--text2)'}">${fmtSol(p.il_usd)}</td>
               <td>${p.duration_hours?.toFixed(1) || '-'}h</td>
-              <td style="color:var(--text2);font-size:11px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(p.close_reason||'').replace(/"/g,'&quot;')}">${fmtExitReason(p)}</td>
+              <td style="color:var(--text2);font-size:11px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(p.exit_reason||p.close_reason||'').replace(/"/g,'&quot;')}">${fmtExitReason(p)}</td>
               <td style="font-size:11px">${p.opened_at ? new Date(p.opened_at).toLocaleString() : '-'}</td>
               <td style="font-size:11px">${p.closed_at ? new Date(p.closed_at).toLocaleString() : '-'}</td>
             </tr>

@@ -77,11 +77,26 @@ export function isVirtualMode() {
 // ─── Virtual wallet ───────────────────────────────────────────────────────────
 
 /**
- * Get virtual wallet balance.
+ * Get virtual wallet balance — computed from position data, not stored state.
+ * This ensures wallet.sol always matches the position reality regardless of
+ * whether closes went through the virtual engine or were done externally.
+ *
+ * Formula: initial_sol - open_deployed + closed_pnl
  */
 export function getVirtualWallet() {
   const state = loadState();
-  return { sol: state.wallet.sol, initial_sol: state.wallet.initial_sol };
+  const positions = listPaperPositions();
+  let openDeployed = 0;
+  let closedPnl = 0;
+  for (const p of positions) {
+    if (p.status === "open") {
+      openDeployed += p.deposit ?? 0;
+    } else if (p.status === "closed") {
+      closedPnl += p.net_pnl ?? 0;
+    }
+  }
+  const sol = +(state.wallet.initial_sol - openDeployed + closedPnl).toFixed(6);
+  return { sol, initial_sol: state.wallet.initial_sol };
 }
 
 /**
@@ -89,22 +104,25 @@ export function getVirtualWallet() {
  */
 function deductFromWallet(amount) {
   const state = loadState();
-  if (state.wallet.sol < amount) {
+  const computed = getVirtualWallet();
+  if (computed.sol < amount) {
     throw new Error(
-      `Virtual wallet insufficient: ${state.wallet.sol.toFixed(2)} SOL < ${amount.toFixed(2)} SOL`
+      `Virtual wallet insufficient: ${computed.sol.toFixed(2)} SOL < ${amount.toFixed(2)} SOL`
     );
   }
-  state.wallet.sol = +(state.wallet.sol - amount).toFixed(6);
+  state.wallet.sol = +(computed.sol - amount).toFixed(6);
   saveState(state);
   return state.wallet.sol;
 }
 
 /**
  * Add to virtual wallet. Returns new balance.
+ * Balance is now computed from positions, so this just syncs the state file.
  */
 function addToWallet(amount) {
   const state = loadState();
-  state.wallet.sol = +(state.wallet.sol + amount).toFixed(6);
+  const computed = getVirtualWallet();
+  state.wallet.sol = computed.sol;
   saveState(state);
   return state.wallet.sol;
 }
@@ -329,6 +347,7 @@ export function getVirtualWalletBalances() {
   return {
     sol: wallet.sol,
     total_usd: wallet.sol, // simplified: 1 SOL = 1 USD for display
+    initial_sol: wallet.initial_sol,
     // We keep it simple — virtual wallet just tracks SOL
     tokens: [],
   };
