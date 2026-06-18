@@ -501,7 +501,7 @@ function renderCard(p, c) {
       <div class="card-header">
         <div class="pair">
           <a href="https://gmgn.ai/sol/token/${p.token_mint || ''}" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:none;border-bottom:1px dotted rgba(255,255,255,0.2)">${p.pair}</a>
-          <span class="oor-badge ${oorClass}">${oorLabel}</span>
+          <span class="oor-badge ${oorClass}" data-oor-minutes="${p.minutes_out_of_range ?? ''}" data-oor-limit="${c.outOfRangeWaitMinutes}">${oorLabel}</span>
         </div>
         <div class="pnl-big ${pnlClass}">${(p.pnl_pct||0) >= 0 ? '+' : ''}${(p.pnl_pct||0).toFixed(2)}%</div>
       </div>
@@ -573,8 +573,12 @@ function drawChart(p, i, c) {
       const chartClose = parseFloat(lastCdl.close || lastCdl.c);
       if (!isNaN(chartClose) && lower > 0 && upper > 0) {
         const chartInRange = chartClose >= lower && chartClose <= upper;
+        const oorMinutes = badge.dataset.oorMinutes;
+        const oorLimit = badge.dataset.oorLimit;
         badge.className = 'oor-badge ' + (chartInRange ? 'in' : 'out');
-        badge.textContent = chartInRange ? 'IN' : 'OOR';
+        badge.textContent = chartInRange
+          ? 'IN'
+          : (oorMinutes ? `OOR ${oorMinutes}m/${oorLimit}m` : 'OOR');
       }
     }
 
