@@ -415,37 +415,51 @@ export function getStateSummary() {
 }
 
 /**
- * Check all exit conditions for a position (rug guard, trailing TP, stop loss, OOR, low yield).
- * Updates peak_pnl_pct, trailing_active, and OOR state.
- * @param {string} position_address
- * @param {object} positionData - fields from getMyPositions: pnl_pct, in_range, fee_per_tvl_24h
- * @param {object} mgmtConfig
- * Returns { action, reason } or null if no exit needed.
+ * Parse trail_tiers config string and find the matching trail drop percentage
+ * based on the current peak PnL.
+ *
+ * Format: "activatePct:trailPct,activatePct:trailPct,…" e.g. "30:15,60:20,100:30"
+ * Selects the tier with the highest activatePct <= peakPnlPct.
+ * Falls back to trailingDropPct if no tier matches.
  */
-/**
- * Determine OOR direction from positionData.
- */
-function oorDirection(positionData) {
-  const { active_bin, lower_bin, upper_bin } = positionData;
-  if (active_bin != null && upper_bin != null && active_bin > upper_bin) return "oor_above";
-  if (active_bin != null && lower_bin != null && active_bin < lower_bin) return "oor_below";
-  return "oor";
-}
+export function getEffectiveTrailDropPct(peakPnlPct, mgmtConfig) {
+  const tiersRaw = mgmtConfig.trailTiers;
+  if (!tiersRaw || typeof tiersRaw !== "string") {
+    return mgmtConfig.trailingDropPct;
+  }
+  try {
+    const tiers = tiersRaw
+      .split(",")
+      .map(s => {
+        const parts = s.trim().split(":");
+        if (parts.length !== 2) return null;
+        const activatePct = Number(parts[0]);
+        const trailPct = Number(parts[1]);
+        return Number.isFinite(activatePct) && Number.isFinite(trailPct) ? { activatePct, trailPct } : null;
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.activatePct - b.activatePct);
 
-/**
- * Canonical exit_reason for each action.
- */
-function actionToExitReason(action, positionData) {
-  switch (action) {
-    case "RUG_GUARD":    return "rug_guard";
-    case "STOP_LOSS":    return "stop_loss";
-    case "TRAILING_TP":  return "trailing_tp";
-    case "OUT_OF_RANGE": return oorDirection(positionData);
-    case "LOW_YIELD":    return "low_yield";
-    default:             return "agent_decision";
+    if (tiers.length === 0) return mgmtConfig.trailingDropPct;
+
+    const peak = peakPnlPct ?? 0;
+    let selected = null;
+    for (const t of tiers) {
+      if (peak >= t.activatePct) selected = t;
+      else break;
+    }
+    return selected ? selected.trailPct : mgmtConfig.trailingDropPct;
+  } catch {
+    return mgmtConfig.trailingDropPct;
   }
 }
 
+/**
+ * Check all exit conditions for a position (rug guard, trailing TP, stop loss, OOR, low yield).
+ * Updates peak_pnl_pct, trailing_active, and OOR state.
+ *
+ * Returns { action, exit_reason, reason } or null if no exit condition is met.
+ */
 export function updatePnlAndCheckExits(position_address, positionData, mgmtConfig) {
   const { pnl_pct: currentPnlPct, pnl_pct_suspicious, in_range, fee_per_tvl_24h } = positionData;
   const state = load();
@@ -510,14 +524,15 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     };
   }
 
-  // ── Trailing TP ────────────────────────────────────────────────
+  // ── Trailing TP (supports progressive trail_tiers) ─────────────
   if (!pnl_pct_suspicious && pos.trailing_active) {
+    const effectiveDropPct = getEffectiveTrailDropPct(pos.peak_pnl_pct, mgmtConfig);
     const dropFromPeak = pos.peak_pnl_pct - currentPnlPct;
-    if (dropFromPeak >= mgmtConfig.trailingDropPct) {
+    if (dropFromPeak >= effectiveDropPct) {
       return {
         action: "TRAILING_TP",
         exit_reason: "trailing_tp",
-        reason: `Trailing TP: peak ${pos.peak_pnl_pct.toFixed(2)}% → current ${currentPnlPct.toFixed(2)}% (dropped ${dropFromPeak.toFixed(2)}% >= ${mgmtConfig.trailingDropPct}%)`,
+        reason: `Trailing TP: peak ${pos.peak_pnl_pct.toFixed(2)}% → current ${currentPnlPct.toFixed(2)}% (dropped ${dropFromPeak.toFixed(2)}% >= ${effectiveDropPct.toFixed(1)}%)`,
         needs_confirmation: true,
         peak_pnl_pct: pos.peak_pnl_pct,
         current_pnl_pct: currentPnlPct,

@@ -28,7 +28,7 @@ import {
 import { generateBriefing } from "./briefing.js";
 import { tickPaperPositions, listPaperPositions } from "./paper-positions.js";
 import { isVirtualMode, getVirtualStatus, tickVirtualPositions, getVirtualPositionsAsReal, getVirtualWallet, virtualDeployPosition } from "./virtual-engine.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setExitReason, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setExitReason, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getEffectiveTrailDropPct } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
@@ -224,10 +224,12 @@ function scheduleTrailingDropConfirmation(positionAddress) {
         const position = result?.positions?.find((p) => p.position === positionAddress);
         pnlPct = position?.pnl_pct ?? null;
       }
+      const tracked = getTrackedPosition(positionAddress);
+      const effectiveDrop = getEffectiveTrailDropPct(tracked?.pending_trailing_peak_pnl_pct, config.management);
       const resolved = resolvePendingTrailingDrop(
         positionAddress,
         pnlPct,
-        config.management.trailingDropPct,
+        effectiveDrop,
         TRAILING_DROP_CONFIRM_TOLERANCE_PCT,
       );
       if (resolved?.confirmed) {
@@ -1052,7 +1054,8 @@ Summarize the current portfolio health, total fees earned, and performance of al
         const exit = updatePnlAndCheckExits(p.position, p, config.management);
         if (exit) {
           if (exit.action === "TRAILING_TP" && exit.needs_confirmation && shouldUsePnlRecheck()) {
-            if (queueTrailingDropConfirmation(p.position, exit.peak_pnl_pct, exit.current_pnl_pct, config.management.trailingDropPct)) {
+            const effectiveDrop = getEffectiveTrailDropPct(exit.peak_pnl_pct, config.management);
+            if (queueTrailingDropConfirmation(p.position, exit.peak_pnl_pct, exit.current_pnl_pct, effectiveDrop)) {
               scheduleTrailingDropConfirmation(p.position);
             }
             continue;
@@ -1388,7 +1391,7 @@ function formatConfigSnapshot() {
     `Strategy: ${config.strategy.strategy} | bins: [${config.strategy.minBinsBelow}–${config.strategy.maxBinsBelow}] (volatility-scaled)`,
     `Deploy: ${config.management.deployAmountSol} SOL | gasReserve: ${config.management.gasReserve} | maxPositions: ${config.risk.maxPositions}`,
     `Stop loss: ${config.management.stopLossPct}% | take profit: ${config.management.takeProfitPct}%`,
-    `Trailing: ${config.management.trailingTakeProfit ? "on" : "off"} | trigger ${config.management.trailingTriggerPct}% | drop ${config.management.trailingDropPct}%`,
+    `Trailing: ${config.management.trailingTakeProfit ? "on" : "off"} | trigger ${config.management.trailingTriggerPct}% | drop ${config.management.trailingDropPct}%${config.management.trailTiers ? ` | tiers ${config.management.trailTiers}` : ""}`,
     `OOR: ${config.management.outOfRangeWaitMinutes}m | cooldown ${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h`,
     `Repeat deploy cooldown: ${config.management.repeatDeployCooldownEnabled ? "on" : "off"} | ${config.management.repeatDeployCooldownTriggerCount}x / ${config.management.repeatDeployCooldownHours}h | min fee earned ${config.management.repeatDeployCooldownMinFeeEarnedPct}% | ${config.management.repeatDeployCooldownScope}`,
     `Yield floor: ${config.management.minFeePerTvl24h}% | min age ${config.management.minAgeBeforeYieldCheck}m`,
@@ -1557,6 +1560,7 @@ function renderSettingsMenu(page = "main") {
       [toggleButton("trailingTakeProfit", "Trailing TP")],
       stepButtons("trailingTriggerPct", "Trail trigger", 0.5, { digits: 1 }),
       stepButtons("trailingDropPct", "Trail drop", 0.5, { digits: 1 }),
+      inputButton("trailTiers", "Trail tiers (act:drop,…)"),
       [toggleButton("repeatDeployCooldownEnabled", "Repeat cooldown")],
       inputButton("repeatDeployCooldownTriggerCount", "Repeat count"),
       inputButton("repeatDeployCooldownHours", "Repeat hrs"),

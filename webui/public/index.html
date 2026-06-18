@@ -401,6 +401,7 @@ function render(d) {
     <span class="config-tag">SL <strong>${c.stopLossPct}%</strong></span>
     <span class="config-tag">TP <strong>${c.takeProfitPct}%</strong></span>
     <span class="config-tag">trailing <strong>${c.trailingTakeProfit ? `ON (trg ${c.trailingTriggerPct}%, drop ${c.trailingDropPct}%)` : 'OFF'}</strong></span>
+    <span class="config-tag">trail tiers <strong>${c.trailTiers || '−'}</strong></span>
     <span class="config-tag">OOR <strong>${c.outOfRangeWaitMinutes}m</strong></span>
     <span class="config-tag">deploy <strong>${c.deployAmountSol} SOL</strong></span>
     <span class="config-tag">gas <strong>${c.gasReserve} SOL</strong></span>

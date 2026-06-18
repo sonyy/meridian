@@ -361,6 +361,7 @@ app.get("/api/positions", async (req, res) => {
         trailingTakeProfit: config.management?.trailingTakeProfit ?? null,
         trailingTriggerPct: config.management?.trailingTriggerPct ?? null,
         trailingDropPct: config.management?.trailingDropPct ?? null,
+    trailTiers: config.management?.trailTiers ?? null,
         outOfRangeWaitMinutes: config.management?.outOfRangeWaitMinutes ?? null,
         strategy: config.strategy?.strategy ?? null,
         minBinsBelow: config.strategy?.minBinsBelow ?? null,
