@@ -489,7 +489,7 @@ export function patchPaperPosition(id, updates) {
  * Close a paper position. Returns final summary.
  */
 export function closePaperPosition(id, reason = null) {
-  const state = loadStateRaw();
+  const state = load();
   const pos = state.positions[id];
   if (!pos) throw new Error(`Paper position ${id} not found`);
   if (pos.status === "closed") throw new Error(`Paper position ${id} already closed`);
