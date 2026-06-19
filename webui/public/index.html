@@ -566,20 +566,12 @@ function drawChart(p, i, c) {
   }
 
   klinePromise.then(kd => {
-    // Update OOR badge from chart data (last candle close vs range)
+    // Update OOR badge visual class using server price (Meteora pool),
+    // NOT kline data (GMGN aggregate — different price source).
     const badge = card.querySelector('.oor-badge');
-    if (badge && kd && kd.candles && kd.candles.length > 0) {
-      const lastCdl = kd.candles[kd.candles.length - 1];
-      const chartClose = parseFloat(lastCdl.close || lastCdl.c);
-      if (!isNaN(chartClose) && lower > 0 && upper > 0) {
-        const chartInRange = chartClose >= lower && chartClose <= upper;
-        const oorMinutes = badge.dataset.oorMinutes;
-        const oorLimit = badge.dataset.oorLimit;
-        badge.className = 'oor-badge ' + (chartInRange ? 'in' : 'out');
-        badge.textContent = chartInRange
-          ? 'IN'
-          : (oorMinutes ? `OOR ${oorMinutes}m/${oorLimit}m` : 'OOR');
-      }
+    if (badge && !isNaN(price) && lower > 0 && upper > 0) {
+      const metInRange = price >= lower && price <= upper;
+      badge.className = 'oor-badge ' + (metInRange ? 'in' : 'out');
     }
 
     const prices = [];
