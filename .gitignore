@@ -11,6 +11,11 @@ node_modules/
 user-config.json
 gmgn-config.json
 
+# SQLite database (replaces paper-positions.json for virtual positions)
+meridian.db
+meridian.db-shm
+meridian.db-wal
+
 # Runtime state (position tracking, lessons — user-specific)
 state.json
 lessons.json

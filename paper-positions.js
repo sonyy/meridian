@@ -12,6 +12,7 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { config } from "./config.js";
+import { loadPositions, savePositions as dbSavePositions } from "./lib/db.js";
 
 const STATE_FILE = "./paper-positions.json";
 const DLMM_API  = "https://dlmm.datapi.meteora.ag";
@@ -20,8 +21,14 @@ const DLMM_API  = "https://dlmm.datapi.meteora.ag";
 let _tickInProgress = false;
 
 // ─── Persistence ──────────────────────────────────────────────────────────────
+// Primary: SQLite. Secondary: JSON (backward compat for core files).
 
 function load() {
+  try {
+    const db = loadPositions();
+    if (db && Object.keys(db.positions).length) return db;
+  } catch (_) { /* fall through to JSON */ }
+  // Fallback: read from JSON
   if (!fs.existsSync(STATE_FILE)) return { positions: {} };
   try {
     return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
@@ -32,6 +39,11 @@ function load() {
 }
 
 function save(state) {
+  // Primary: SQLite
+  try { dbSavePositions(state); } catch (e) {
+    log("paper_sim", `SQLite save failed: ${e.message}`);
+  }
+  // Secondary: JSON (backward compat for core files)
   try {
     const tmp = STATE_FILE + ".tmp." + process.pid;
     fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
@@ -150,18 +162,20 @@ export async function fetchPoolConfig(poolAddress) {
 }
 
 /**
- * Fetch 5m candles from startTimestamp (unix seconds) to now.
- * Returns only candles newer than startTimestamp.
+ * Max OHLCV range the Meteora DLMM API accepts before returning 400.
+ * Empirical testing: >=12h → 400, 1h → 200. Conservatively limit to 60 min.
  */
+const MAX_OHLCV_RANGE_SEC = 3600;
+
 async function fetchNewCandles(poolAddress, fromTimestamp) {
   const end = Math.floor(Date.now() / 1000);
-  const url  = `${DLMM_API}/pools/${poolAddress}/ohlcv?timeframe=5m&start_time=${fromTimestamp}&end_time=${end}`;
+  const start = Math.max(fromTimestamp, end - MAX_OHLCV_RANGE_SEC);
+  const url  = `${DLMM_API}/pools/${poolAddress}/ohlcv?timeframe=5m&start_time=${start}&end_time=${end}`;
   const res  = await fetch(url, {
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`OHLCV fetch failed: ${res.status}`);
   const data = await res.json();
-  // Filter out the candle at exactly fromTimestamp (already processed)
   return (data.data ?? []).filter((c) => c.timestamp > fromTimestamp);
 }
 
