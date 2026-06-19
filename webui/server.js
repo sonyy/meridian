@@ -420,9 +420,36 @@ function rebuildWeights(strategy, lowerBinId, upperBinId, singleSide) {
 
 function enrich(paperPos, trackedMap, status) {
   const t = trackedMap[paperPos.id];
-  const outSince = t?.out_of_range_since
+  
+  // Compute OOR minutes: prefer state.json out_of_range_since, fall back to paper data estimate
+  let outSince = t?.out_of_range_since
     ? Math.floor((Date.now() - new Date(t.out_of_range_since).getTime()) / 60000)
     : null;
+  
+  // For virtual positions OOR per paper data but lacking state.json out_of_range_since:
+  // estimate from candle stats (total vs in-range candles × avg candle interval)
+  if (outSince == null && paperPos.status === "open" && paperPos.last_price != null &&
+      paperPos.range?.lower != null && paperPos.range?.upper != null &&
+      (paperPos.last_price < paperPos.range.lower || paperPos.last_price > paperPos.range.upper)) {
+    const ageMin = paperPos.duration_hours ? paperPos.duration_hours * 60
+      : paperPos.opened_at ? Math.floor((Date.now() - new Date(paperPos.opened_at).getTime()) / 60000)
+      : 0;
+    if (paperPos.candles_total > 0 && paperPos.candles_in_range != null) {
+      const oorCandles = Math.max(0, paperPos.candles_total - paperPos.candles_in_range);
+      const avgInterval = ageMin / paperPos.candles_total;
+      outSince = Math.round(oorCandles * avgInterval);
+    } else if (ageMin > 0) {
+      // No candle data — estimate from last candle timestamp if available
+      if (paperPos.last_candle_timestamp) {
+        outSince = Math.floor((Date.now() - new Date(paperPos.last_candle_timestamp * 1000).getTime()) / 60000);
+      } else {
+        // Worst case: age since last in-range (conservative: use age_min * in_range_pct deviation)
+        outSince = paperPos.in_range_pct != null && paperPos.in_range_pct < 100
+          ? Math.round(ageMin * (1 - paperPos.in_range_pct / 100))
+          : ageMin;
+      }
+    }
+  }
 
   return {
     id: paperPos.id,

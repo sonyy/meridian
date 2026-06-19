@@ -38,6 +38,7 @@ import { getWeightsSummary } from "./signal-weights.js";
 import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./hivemind.js";
 import { appendDecision } from "./decision-log.js";
 
+import fs from "node:fs";
 import { REPO_ROOT, repoPath } from "./repo-root.js";
 
 const entrypointPath = process.env.pm_exec_path || process.argv[1];
@@ -986,8 +987,38 @@ IMPORTANT:
   return screenReport;
 }
 
-export function startCronJobs() {
+export async function startCronJobs() {
   stopCronJobs(); // stop any running tasks before (re)starting
+
+  // ── Auto-cleanup: mark stale tracked positions without active paper positions as closed ──
+  try {
+    if (isVirtualMode()) {
+      const paperRaw = JSON.parse(fs.readFileSync(repoPath("paper-positions.json"), "utf8"));
+      const activePaperIds = new Set(
+        Object.entries(paperRaw.positions || {})
+          .filter(([, v]) => v.status === "open")
+          .map(([k]) => k)
+      );
+      const statePath = repoPath("state.json");
+      const stateRaw = JSON.parse(fs.readFileSync(statePath, "utf8"));
+      let cleaned = 0;
+      for (const [addr, pos] of Object.entries(stateRaw.positions || {})) {
+        if (pos.closed) continue;
+        if (!activePaperIds.has(addr)) {
+          pos.closed = true;
+          pos.closed_at = new Date().toISOString();
+          pos.close_reason = "ghost_cleanup";
+          cleaned++;
+        }
+      }
+      if (cleaned > 0) {
+        fs.writeFileSync(statePath, JSON.stringify(stateRaw, null, 2));
+        log("cron", `Auto-cleaned ${cleaned} ghost position(s) from state.json`);
+      }
+    }
+  } catch (ghostErr) {
+    log("cron_warn", `Ghost position cleanup failed: ${ghostErr.message}`);
+  }
 
   const mgmtTask = cron.schedule(`*/${Math.max(1, config.schedule.managementIntervalMin)} * * * *`, async () => {
     if (_managementBusy) return;

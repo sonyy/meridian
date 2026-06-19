@@ -455,6 +455,16 @@ export function getEffectiveTrailDropPct(peakPnlPct, mgmtConfig) {
 }
 
 /**
+ * Determine OOR direction (above/below) from position data.
+ */
+function oorDirection(positionData) {
+  const { last_price, lower_price, upper_price } = positionData;
+  if (last_price != null && upper_price != null && last_price > upper_price) return "oor_above";
+  if (last_price != null && lower_price != null && last_price < lower_price) return "oor_below";
+  return "oor";
+}
+
+/**
  * Check all exit conditions for a position (rug guard, trailing TP, stop loss, OOR, low yield).
  * Updates peak_pnl_pct, trailing_active, and OOR state.
  *
