@@ -566,12 +566,34 @@ function drawChart(p, i, c) {
   }
 
   klinePromise.then(kd => {
-    // Update OOR badge visual class using server price (Meteora pool),
-    // NOT kline data (GMGN aggregate — different price source).
+    // OOR badge: use kline data (GMGN = real market price)
+    // for IN/OUT + compute OOR minutes from consecutive OOR candles.
     const badge = card.querySelector('.oor-badge');
-    if (badge && !isNaN(price) && lower > 0 && upper > 0) {
-      const metInRange = price >= lower && price <= upper;
-      badge.className = 'oor-badge ' + (metInRange ? 'in' : 'out');
+    if (badge && kd && kd.candles && kd.candles.length > 0 && lower > 0 && upper > 0) {
+      const lastCdl = kd.candles[kd.candles.length - 1];
+      const chartClose = parseFloat(lastCdl.close || lastCdl.c);
+      if (!isNaN(chartClose)) {
+        const chartInRange = chartClose >= lower && chartClose <= upper;
+        badge.className = 'oor-badge ' + (chartInRange ? 'in' : 'out');
+        if (!chartInRange) {
+          // Consecutive OOR candles from end
+          let oorCount = 0;
+          for (let i = kd.candles.length - 1; i >= 0; i--) {
+            const cl = parseFloat(kd.candles[i].close || kd.candles[i].c);
+            if (!isNaN(cl) && (cl < lower || cl > upper)) oorCount++;
+            else break;
+          }
+          const rangeSec = (kd.to || 0) - (kd.from || 0);
+          const intervalMin = rangeSec > 0 && kd.candles.length > 1
+            ? (rangeSec / 60) / kd.candles.length
+            : 5;
+          const oorMin = Math.round(oorCount * intervalMin) || 1;
+          const oorLimit = badge.dataset.oorLimit || '30';
+          badge.textContent = `OOR ${oorMin}m/${oorLimit}m`;
+        } else {
+          badge.textContent = 'IN';
+        }
+      }
     }
 
     const prices = [];
