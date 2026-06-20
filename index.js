@@ -1212,7 +1212,11 @@ function getDeterministicCloseRule(position, managementConfig) {
   })();
 
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct) {
-    return { action: "CLOSE", rule: 1, reason: "stop loss", exit_reason: "stop_loss" };
+    const slOnlyWhenOor = managementConfig.stopLossOnlyWhenOOR === true;
+    const isOor = position.in_range === false && (position.minutes_out_of_range ?? 0) >= 1;
+    if (!slOnlyWhenOor || isOor) {
+      return { action: "CLOSE", rule: 1, reason: "stop loss", exit_reason: "stop_loss" };
+    }
   }
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
     return { action: "CLOSE", rule: 2, reason: "take profit", exit_reason: "take_profit" };

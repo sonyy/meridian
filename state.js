@@ -525,13 +525,18 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     }
   }
 
-  // ── Stop loss ──────────────────────────────────────────────────
+  // ── Stop loss (optional: only when OOR) ───────────────────────
   if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct <= mgmtConfig.stopLossPct) {
-    return {
-      action: "STOP_LOSS",
-      exit_reason: "stop_loss",
-      reason: `Stop loss: PnL ${currentPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%`,
-    };
+    const slOnlyWhenOor = mgmtConfig.stopLossOnlyWhenOOR === true;
+    if (slOnlyWhenOor && !pos.out_of_range_since) {
+      log("state", `Position ${position_address} PnL ${currentPnlPct.toFixed(2)}% <= SL ${mgmtConfig.stopLossPct}% but SKIPPED — position still in range (stopLossOnlyWhenOOR)`);
+    } else {
+      return {
+        action: "STOP_LOSS",
+        exit_reason: "stop_loss",
+        reason: `Stop loss: PnL ${currentPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%`,
+      };
+    }
   }
 
   // ── Trailing TP (supports progressive trail_tiers) ─────────────

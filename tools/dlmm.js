@@ -11,7 +11,7 @@ import {
 } from "@solana/web3.js";
 import BN from "bn.js";
 import bs58 from "bs58";
-import { config, computeDeployAmount, MIN_SAFE_BINS_BELOW } from "../config.js";
+import { config, computeDeployAmount, MIN_SAFE_BINS_BELOW, WIDE_RANGE_BIN_THRESHOLD } from "../config.js";
 import { log } from "../logger.js";
 import {
   trackPosition,
@@ -686,13 +686,13 @@ export async function deployPosition({
         upside_pct: upside_pct ?? null,
         amount_x: finalAmountX,
         amount_y: finalAmountY,
-        wide_range: totalBins > 69,
+        wide_range: totalBins > WIDE_RANGE_BIN_THRESHOLD,
       },
       message: "DRY RUN — no transaction sent",
     };
   }
 
-  const isWideRange = totalBins > 69;
+  const isWideRange = totalBins > WIDE_RANGE_BIN_THRESHOLD;
   const minBinId = activeBin.binId - activeBinsBelow;
   const maxBinId = isSingleSidedSol ? activeBin.binId : activeBin.binId + activeBinsAbove;
 
@@ -877,7 +877,7 @@ export async function deployPosition({
     const txHashes = [];
 
     if (isWideRange) {
-      // ── Wide Range Path (>69 bins) ─────────────────────────────────
+      // ── Wide Range Path (>WIDE_RANGE_BIN_THRESHOLD bins) ─────────────────────────────────
       // Solana limits inner instruction realloc to 10240 bytes, so we can't create
       // a large position in a single initializePosition ix.
       // Solution: createExtendedEmptyPosition (returns Transaction | Transaction[]),
@@ -914,7 +914,7 @@ export async function deployPosition({
         log("deploy", `Add liquidity tx ${i + 1}/${addTxArray.length}: ${txHash}`);
       }
     } else {
-      // ── Standard Path (≤69 bins) ─────────────────────────────────
+      // ── Standard Path (≤WIDE_RANGE_BIN_THRESHOLD bins) ─────────────────────────────────
       const tx = await pool.initializePositionAndAddLiquidityByStrategy({
         positionPubKey: newPosition.publicKey,
         user: wallet.publicKey,
