@@ -110,6 +110,39 @@ async function resolveMint(symbol) {
   return null;
 }
 
+// ── API: PnL history (cumulative PnL over time from closed positions) ──
+app.get("/api/pnl-history", async (req, res) => {
+  try {
+    const paperMod = await import("../paper-positions.js");
+    const allPaper = paperMod.listPaperPositions();
+
+    const closed = allPaper
+      .filter(p => p.status === "closed" && p.closed_at && p.net_pnl != null)
+      .sort((a, b) => new Date(a.closed_at) - new Date(b.closed_at));
+
+    let cumPnl = 0;
+    const points = [];
+    for (const p of closed) {
+      cumPnl += p.net_pnl;
+      points.push({
+        timestamp: new Date(p.closed_at).getTime(),
+        net_pnl: p.net_pnl,
+        cumPnl: +cumPnl.toFixed(6),
+        cumPnlPct: p.deposit > 0 ? +((cumPnl / p.deposit) * 100).toFixed(2) : 0,
+        pair: p.pair || null,
+        deposit: p.deposit || 0,
+        pnl_pct: p.pnl_pct || null,
+        close_reason: p.close_reason || null,
+        exit_reason: p.exit_reason || null,
+      });
+    }
+
+    res.json({ count: points.length, points });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── Kline in-memory cache (reduce subprocess spawns) ──────────────────
 const _klineCache = new Map();
 const KLINE_CACHE_TTL = 120_000; // 2 minutes

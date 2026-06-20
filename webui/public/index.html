@@ -201,6 +201,25 @@
   }
   .closed-table tr:hover td { background: var(--bg3); }
 
+  /* ─── pnl history chart section ─── */
+  .pnl-chart-section {
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 20px; margin-bottom: 24px;
+  }
+  .pnl-chart-section .chart-title {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
+    color: var(--text2); margin-bottom: 12px;
+  }
+  .pnl-chart-wrap {
+    position: relative; width: 100%; height: 180px;
+  }
+  .pnl-chart-wrap canvas { width: 100% !important; height: 180px !important; max-width: 100%; }
+  .pnl-chart-empty {
+    display: flex; align-items: center; justify-content: center;
+    height: 180px; color: var(--text2); font-size: 13px;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+
   .no-data {
     text-align: center; padding: 48px 16px; color: var(--text2); font-size: 14px;
   }
@@ -224,6 +243,14 @@
 </div>
 
 <div class="summary" id="summary"></div>
+
+<div class="pnl-chart-section" id="pnlChartSection">
+  <div class="chart-title">cumulative PnL over time</div>
+  <div class="pnl-chart-wrap">
+    <canvas id="pnlChart"></canvas>
+  </div>
+</div>
+
 <div class="config-bar" id="configBar"></div>
 
 <div class="section-title">open positions <span class="count" id="openCount"></span></div>
@@ -281,6 +308,8 @@ function fmtExitReason(p) {
   return short.slice(0, 42) + '...';
 }
 let charts = new Map();  // positionId → Chart instance
+let pnlChartInstance = null;
+let _lastPnlHash = '';  // avoid pointless destroy/create cycles
 
 // Plugin: draw colored price markers on Y-axis
 Chart.register({
@@ -344,6 +373,7 @@ function fetchData() {
     .then(d => {
       document.getElementById('refreshError')?.remove();
       render(d);
+      renderPnlChart();
     })
     .catch(e => {
       // Don't wipe data — just show a subtle error badge
@@ -852,6 +882,170 @@ function renderPnlBar(el, d) {
   curLbl.style.transform = 'translateX(-50%)';
   curLbl.style.color = C_BLUE;
   curLbl.textContent = `${d.netPnlPct >= 0 ? '+' : ''}${d.netPnlPct.toFixed(2)}%`;
+}
+
+// ── Global PnL history chart ─────────────────────────────────────────
+function renderPnlChart() {
+  const section = document.getElementById('pnlChartSection');
+  const canvas = document.getElementById('pnlChart');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+
+  fetch('/api/pnl-history', { cache: 'no-store' })
+    .then(r => r.json())
+    .then(data => {
+      if (!data.points || data.points.length < 2) {
+        pnlChartInstance = null;
+        section.innerHTML = `<div class="chart-title">cumulative PnL over time</div><div class="pnl-chart-empty">need at least 2 closed trades for a chart</div>`;
+        return;
+      }
+
+      // Quick hash to avoid unnecessary redraws
+      const h = JSON.stringify(data.points.map(p => p.cumPnl.toFixed(6)));
+      if (h === _lastPnlHash && pnlChartInstance) return;
+      _lastPnlHash = h;
+
+      const labels = data.points.map(p => p.timestamp);
+      const values = data.points.map(p => p.cumPnl);
+      const pts = data.points;
+
+      // Restore section HTML if it was empty
+      if (!section.querySelector('.pnl-chart-wrap')) {
+        section.innerHTML = `<div class="chart-title">cumulative PnL over time</div><div class="pnl-chart-wrap"><canvas id="pnlChart"></canvas></div>`;
+      }
+
+      // Destroy stale instance
+      if (pnlChartInstance) { pnlChartInstance.destroy(); pnlChartInstance = null; }
+
+      const zeroPlugin = {
+        id: 'zeroLine',
+        afterDraw(chart) {
+          const yScale = chart.scales.y;
+          const chartArea = chart.chartArea;
+          if (!yScale || !chartArea) return;
+          const yZero = yScale.getPixelForValue(0);
+          if (yZero >= chartArea.top && yZero <= chartArea.bottom) {
+            chart.ctx.save();
+            chart.ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+            chart.ctx.lineWidth = 1;
+            chart.ctx.setLineDash([3, 3]);
+            chart.ctx.beginPath();
+            chart.ctx.moveTo(chartArea.left, yZero);
+            chart.ctx.lineTo(chartArea.right, yZero);
+            chart.ctx.stroke();
+            chart.ctx.setLineDash([]);
+            chart.ctx.restore();
+          }
+        }
+      };
+
+      pnlChartInstance = new Chart(ctx, {
+        type: 'line',
+        plugins: [zeroPlugin],
+        data: {
+          labels,
+          datasets: [{
+            data: values,
+            borderWidth: 2,
+            pointRadius: 0,
+            pointHitRadius: 5,
+            fill: true,
+            tension: 0.08,
+            segment: {
+              borderColor: (ctx) => {
+                const v = ctx.p1.parsed.y;
+                return v >= 0 ? '#34d399' : '#fb7185';
+              },
+              backgroundColor: (ctx) => {
+                const v = ctx.p1.parsed.y;
+                return v >= 0 ? 'rgba(52,211,153,0.08)' : 'rgba(251,113,133,0.08)';
+              },
+            }
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          _pnlPoints: pts,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              enabled: true,
+              mode: 'index',
+              intersect: false,
+              backgroundColor: '#1a1d26',
+              titleColor: '#e2e5eb',
+              bodyColor: '#888b98',
+              borderColor: '#242834',
+              borderWidth: 1,
+              padding: 10,
+              titleFont: { family: "'IBM Plex Mono', monospace", size: 10 },
+              bodyFont: { family: "'IBM Plex Mono', monospace", size: 11 },
+              callbacks: {
+                title: (items) => {
+                  const d = new Date(items[0].parsed.x);
+                  return d.toLocaleDateString() + ' ' + d.toLocaleTimeString();
+                },
+                label: (item) => {
+                  const v = item.parsed.y;
+                  return `Cumulative: ${v >= 0 ? '+' : ''}${v.toFixed(4)} SOL`;
+                },
+                afterLabel: (item) => {
+                  const pt = pts[item.dataIndex];
+                  if (!pt) return '';
+                  const lines = [];
+                  if (pt.pair) lines.push(`  Pair: ${pt.pair}`);
+                  if (pt.net_pnl != null) {
+                    lines.push(`  Trade PnL: ${pt.net_pnl >= 0 ? '+' : ''}${(+pt.net_pnl).toFixed(4)} SOL`);
+                  }
+                  if (pt.pnl_pct != null) {
+                    lines.push(`  Return: ${pt.pnl_pct >= 0 ? '+' : ''}${(+pt.pnl_pct).toFixed(2)}%`);
+                  }
+                  if (pt.deposit) lines.push(`  Deploy: ${(+pt.deposit).toFixed(2)} SOL`);
+                  const exit = pt.exit_reason || pt.close_reason;
+                  if (exit) lines.push(`  Exit: ${exit}`);
+                  return lines.join('\n');
+                }
+              }
+            }
+          },
+          scales: {
+            x: {
+              type: 'linear',
+              ticks: {
+                color: '#888b98',
+                font: { size: 9, family: "'IBM Plex Mono', monospace" },
+                maxTicksLimit: 8,
+                maxRotation: 0,
+                callback: function(v) {
+                  const d = new Date(v);
+                  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' ' +
+                    d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
+                }
+              },
+              grid: { color: 'rgba(36,40,52,0.4)' },
+              border: { display: false },
+            },
+            y: {
+              ticks: {
+                color: '#888b98',
+                font: { size: 9, family: "'IBM Plex Mono', monospace" },
+                callback: function(v) {
+                  return (v >= 0 ? '+' : '') + v.toFixed(3);
+                }
+              },
+              grid: { color: 'rgba(36,40,52,0.4)' },
+              border: { display: false },
+            },
+          },
+          interaction: { intersect: false, mode: 'index' },
+        },
+      });
+    })
+    .catch(() => {
+      // Silently fail — don't pollute the UI
+    });
 }
 
 function ensureRangeChild(parent, selector, tag, className, style) {
