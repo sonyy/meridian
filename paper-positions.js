@@ -298,15 +298,19 @@ export async function openPaperPosition({
 
   if (lowerBinId >= upperBinId) throw new Error("lower_price must be less than upper_price");
 
-  // SDK bin prices and OHLCV candle prices may differ in scale due to token decimal differences.
-  // Detect scale factor by comparing SDK midpoint to datapi current_price (which matches OHLCV scale).
-  const sdkMidPrice = (lower_price + upper_price) / 2;
-  const priceScale  = currentPrice > 0 && sdkMidPrice > 0 ? currentPrice / sdkMidPrice : 1;
+  // OHLCV candle prices use the same scale as the datapi current_price.
+  // The SDK's getBinIdFromPrice confirms this: getPriceOfBinByBinId(activeBinId, binStep)
+  // equals currentPrice within ~0.1%, meaning NO decimal-based scale adjustment is needed.
+  // The old code computed "sdkMidPrice = (lower_price + upper_price) / 2" and used
+  // priceScale = currentPrice / sdkMidPrice, but for asymmetric ranges this incorrectly
+  // treated range skew as a scale difference, artificially shifting the range bounds.
+  // Fix: use the input prices (already in OHLCV scale) directly.
+  const priceScale = 1;
 
   // Normalized prices — consistent with OHLCV candle close/high/low values
-  const normLowerPrice = lower_price * priceScale;
-  const normUpperPrice = upper_price * priceScale;
-  const normEntryPrice = sdkMidPrice * priceScale; // ≈ currentPrice
+  const normLowerPrice = lower_price;
+  const normUpperPrice = upper_price;
+  const normEntryPrice = currentPrice;
 
   const numBins           = upperBinId - lowerBinId + 1;
   const weights           = buildWeights(strategy_type, lowerBinId, upperBinId, activeBinId, single_side);
@@ -511,7 +515,7 @@ export function closePaperPosition(id, reason = null) {
   pos.status = "closed";
   pos.closed_at = new Date().toISOString();
   // Final PnL snapshot
-  pos.pnl_pct = pos.deposit > 0 ? +((pos.net_pnl / pos.deposit) * 100).toFixed(2) : 0;
+  pos.pnl_pct = pos.deposit_amount > 0 ? +((pos.net_pnl / pos.deposit_amount) * 100).toFixed(2) : 0;
   pos.close_reason = reason;
   state.positions[id] = pos;
   save(state);
