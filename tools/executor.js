@@ -744,6 +744,26 @@ export async function executeTool(name, args) {
             log("executor_warn", `Auto-swap after close failed: ${e.message}`);
           }
         }
+        // After close: send Telegram with wallet balance, deployed value, and open count
+        try {
+          const openPositions = await getMyPositions({ silent: true });
+          const posList = openPositions?.positions ?? [];
+          const openCount = posList.length;
+          const totalDeployed = posList.reduce((sum, p) => sum + (parseFloat(p.total_value_usd) || 0), 0);
+          const bal = await getWalletBalances({});
+          const solBalance = bal?.sol ?? 0;
+          const solUsd = bal?.sol_usd ?? 0;
+          const walletLine = `◎${solBalance.toFixed(4)} SOL${solUsd ? ` ($${solUsd.toFixed(2)})` : ""}`;
+          const deployedLine = `◎${totalDeployed.toFixed(4)} SOL`;
+          log("executor", `Post-close summary — wallet: ${walletLine} | deployed: ${deployedLine} | open: ${openCount}`);
+          sendMessage(
+            `📊 Portfolio setelah close\n` +
+            `💰 Wallet: ${walletLine}\n` +
+            `📈 Terdeploy: ${deployedLine} (${openCount} posisi)`
+          ).catch(() => {});
+        } catch (e) {
+          log("executor_warn", `Post-close position check failed: ${e.message}`);
+        }
       } else if (name === "claim_fees" && config.management.autoSwapAfterClaim && result.base_mint) {
         try {
           const balances = await getWalletBalances({});
