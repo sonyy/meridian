@@ -333,10 +333,10 @@ function condenseGmgnCandidate({ token, pool, poolDetail, security, info, infoAn
     // Stage 3 Meteora search: pool_config.bin_step / base_fee_pct
     bin_step: pool.pool_config?.bin_step ?? poolDetail?.dlmm_params?.bin_step ?? null,
     fee_pct: pool.pool_config?.base_fee_pct ?? poolDetail?.fee_pct ?? null,
-    // Stage 5 Pool Discovery: active_tvl, fee_active_tvl_ratio, volatility, fee (absolute)
+    // Stage 5 Pool Discovery: active_tvl, fee_active_tvl_ratio, volatility
     tvl: round(tvl),
     active_tvl: round(activeTvl),
-    fee_window: round(poolDetail?.fee ?? pool?.fee ?? null),
+    fee_window: round(poolDetail?.fee ?? null),
     fee_active_tvl_ratio: feeActiveTvlRatio,
     volatility: poolDetail?.volatility != null ? Number(Number(poolDetail.volatility).toFixed(2)) : null,
     // Stage 1 GMGN rank: token-level metrics
@@ -614,6 +614,47 @@ export function formatGmgnCandidateForPrompt(p) {
   const vol = p.volume_window != null ? `vol=$${(p.volume_window / 1000).toFixed(1)}k` : "";
   const volatility = Number.isFinite(Number(p.volatility)) && Number(p.volatility) > 0 ? `volatility=${p.volatility}` : "volatility=unknown";
   const ath = p.price_vs_ath_pct != null ? `price_vs_ath=${p.price_vs_ath_pct.toFixed(0)}%` : "";
+
+  const top10 = p.gmgn_token_info_top10_pct != null ? `top10=${p.gmgn_token_info_top10_pct}%` : (p.gmgn_top10_holder_pct != null ? `top10=${p.gmgn_top10_holder_pct}%` : "");
+  const dev = p.gmgn_dev_team_hold_pct != null ? `dev=${p.gmgn_dev_team_hold_pct}%` : "";
+  const bot = p.gmgn_bot_degen_pct != null ? `bot=${p.gmgn_bot_degen_pct}%` : "";
+  const fresh = p.gmgn_fresh_wallet_pct != null ? `fresh=${p.gmgn_fresh_wallet_pct}%` : "";
+  const bundler = p.gmgn_token_info_bundler_pct != null ? `bundler=${p.gmgn_token_info_bundler_pct}%` : (p.gmgn_bundler_pct != null ? `bundler=${p.gmgn_bundler_pct}%` : "");
+
+  const holders = p.holders != null ? `holders=${p.holders.toLocaleString()}` : "";
+  const fees = p.gmgn_total_fee_sol != null ? `fees=${p.gmgn_total_fee_sol.toFixed(0)}SOL` : "";
+  const smart = p.gmgn_smart_wallets != null ? `smart=${p.gmgn_smart_wallets}` : "";
+  const kol = p.gmgn_kol_wallets != null ? `kol=${p.gmgn_kol_wallets}` : "";
+
+  let kolLine = "";
+  if (p.gmgn_preferred_kol_holders?.length) {
+    const pref = p.gmgn_preferred_kol_holders.map((k) => `${k.name} holding ${k.amountPct}%`).join(" | ");
+    const prof = p.gmgn_kol_profit_names?.length ? ` | profit leaders: ${p.gmgn_kol_profit_names.slice(0, 3).join(", ")}` : "";
+    kolLine = `\n  KOL: ${pref}${prof}`;
+  } else if (p.gmgn_kol_names?.length) {
+    const names = p.gmgn_kol_names.slice(0, 3).join(", ");
+    const prof = p.gmgn_kol_profit_names?.length ? ` | profit leaders: ${p.gmgn_kol_profit_names.slice(0, 3).join(", ")}` : "";
+    kolLine = `\n  KOL: ${names}${prof}`;
+  }
+
+  let dumpKolLine = "";
+  if (p.gmgn_dump_kol_holders?.length) {
+    const sig = p.gmgn_dump_kol_holders.map((k) => `${k.name} ${k.amountPct}%`).join(" | ");
+    dumpKolLine = `\n  ⚠ DUMP KOL (significant): ${sig}`;
+  } else if (p.gmgn_dump_kol_minor > 0) {
+    dumpKolLine = `\n  ⚠ DUMP KOL (minor, <${config.gmgn.dumpKolMinHoldPct}%): ${p.gmgn_dump_kol_minor} wallet(s)`;
+  }
+
+  let indLine = "";
+  if (p.indicators) {
+    const ind = p.indicators;
+    const interval = ind.interval ? `[${ind.interval}]` : "";
+    const st = ind.supertrendDirection ? `supertrend=${ind.supertrendDirection}${ind.supertrendBreakUp ? " (breakup)" : ""}` : "";
+    const rsi = ind.rsi != null ? `rsi=${ind.rsi} ${ind.rsiLabel || ""}`.trim() : "";
+    const bb = ind.bbPosition ? `bb=${ind.bbPosition}` : "";
+    const parts = [st, rsi, bb].filter(Boolean).join(" | ");
+    if (parts) indLine = `\n  Indicators ${interval}: ${parts}`;
+  }
 
   const header = [sym, launchpad, age, mcap, binStep].filter(Boolean).join(" | ");
   const pool = [tvl, feeTvl, feeWin, vol, volatility, ath].filter(Boolean).join(" | ");
