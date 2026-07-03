@@ -44,3 +44,7 @@ webui/mint-cache.json
 
 # Test files
 test-*.js
+agent.log
+charon.sqlite*
+index.html
+memory-mitigation-prompt.md

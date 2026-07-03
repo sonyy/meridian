@@ -336,6 +336,7 @@ const toolMap = {
       // management
       minClaimAmount: ["management", "minClaimAmount"],
       autoSwapAfterClaim: ["management", "autoSwapAfterClaim"],
+      autoSwapMinUsd: ["management", "autoSwapMinUsd"],
       outOfRangeBinsToClose: ["management", "outOfRangeBinsToClose"],
       outOfRangeWaitMinutes: ["management", "outOfRangeWaitMinutes"],
       oorCooldownTriggerCount: ["management", "oorCooldownTriggerCount"],
@@ -732,7 +733,8 @@ export async function executeTool(name, args) {
           try {
             const balances = await getWalletBalances({});
             const token = balances.tokens?.find(t => t.mint === result.base_mint);
-            if (token && token.usd >= 0.10) {
+            const swapMinUsd = config.management.autoSwapMinUsd ?? 2.0;
+            if (token && token.usd >= swapMinUsd) {
               log("executor", `Auto-swapping ${token.symbol || result.base_mint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL`);
               const swapResult = await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
               // Tell the model the swap already happened so it doesn't call swap_token again
@@ -768,7 +770,8 @@ export async function executeTool(name, args) {
         try {
           const balances = await getWalletBalances({});
           const token = balances.tokens?.find(t => t.mint === result.base_mint);
-          if (token && token.usd >= 0.10) {
+          const swapMinUsd = config.management.autoSwapMinUsd ?? 2.0;
+          if (token && token.usd >= swapMinUsd) {
             log("executor", `Auto-swapping claimed ${token.symbol || result.base_mint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL`);
             await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
           }

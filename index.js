@@ -703,11 +703,11 @@ Screening skipped — max positions reached (${prePositions.total_positions}/${c
       await new Promise(r => setTimeout(r, 150)); // avoid 429s
     }
 
-    // Hard filters after token recon — block launchpads and excessive Jupiter bot holders
-    // Skipped for GMGN: platforms already filtered upstream; bundler/bot data from GMGN pipeline
+    // Hard filters after token recon — applied to ALL pools including GMGN
+    // GMGN data used as fallback when Jupiter audit fields are unavailable
     const filteredOut = [];
-    const passing = allCandidates.filter(({ pool, ti }) => {
-      if (pool.gmgn) return true;
+    const passing = allCandidates.filter(({ pool, sw, ti }) => {
+      const swCount = Math.max(sw?.in_pool?.length ?? 0, Number(pool.gmgn_smart_wallets ?? 0) || 0);
       const launchpad = ti?.launchpad ?? null;
       if (launchpad && config.screening.allowedLaunchpads?.length > 0 && !config.screening.allowedLaunchpads.includes(launchpad)) {
         log("screening", `Skipping ${pool.name} — launchpad ${launchpad} not in allow-list`);
@@ -719,11 +719,39 @@ Screening skipped — max positions reached (${prePositions.total_positions}/${c
         filteredOut.push({ name: pool.name, reason: `blocked launchpad (${launchpad})` });
         return false;
       }
-      const botPct = ti?.audit?.bot_holders_pct;
+      const botPct = ti?.audit?.bot_holders_pct ?? pool.gmgn_bot_degen_pct;
       const maxBotHoldersPct = config.screening.maxBotHoldersPct;
-      if (botPct != null && maxBotHoldersPct != null && botPct > maxBotHoldersPct) {
+      if (botPct != null && maxBotHoldersPct != null && Number(botPct) > maxBotHoldersPct) {
         log("screening", `Bot-holder filter: dropped ${pool.name} — bots ${botPct}% > ${maxBotHoldersPct}%`);
         filteredOut.push({ name: pool.name, reason: `bot holders ${botPct}% > ${maxBotHoldersPct}%` });
+        return false;
+      }
+      const top10Pct = ti?.audit?.top_holders_pct ?? pool.gmgn_token_info_top10_pct ?? pool.gmgn_top10_holder_pct;
+      if (top10Pct != null && config.screening.maxTop10Pct != null && Number(top10Pct) > config.screening.maxTop10Pct) {
+        log("screening", `Top10 filter: dropped ${pool.name} — top10 ${top10Pct}% > ${config.screening.maxTop10Pct}%`);
+        filteredOut.push({ name: pool.name, reason: `top10 concentration ${top10Pct}% > ${config.screening.maxTop10Pct}%` });
+        return false;
+      }
+      const globalFeesSol = ti?.global_fees_sol ?? pool.gmgn_total_fee_sol;
+      if (globalFeesSol != null && Number(globalFeesSol) < config.screening.minTokenFeesSol) {
+        log("screening", `Fee filter: dropped ${pool.name} — fees ${globalFeesSol} SOL < ${config.screening.minTokenFeesSol} SOL`);
+        filteredOut.push({ name: pool.name, reason: `token fees ${globalFeesSol} SOL below minimum ${config.screening.minTokenFeesSol} SOL` });
+        return false;
+      }
+      // Wash/rugpull/PVP flags apply to all pools
+      if (pool.is_wash) {
+        log("screening", `Wash filter: dropped ${pool.name} — wash trading flagged`);
+        filteredOut.push({ name: pool.name, reason: "wash trading was flagged" });
+        return false;
+      }
+      if (pool.is_rugpull && swCount === 0) {
+        log("screening", `Rugpull filter: dropped ${pool.name} — rugpull risk and no smart wallets`);
+        filteredOut.push({ name: pool.name, reason: "rugpull risk with no smart-wallet offset" });
+        return false;
+      }
+      if (pool.is_pvp && swCount === 0) {
+        log("screening", `PVP filter: dropped ${pool.name} — PVP conflict and no smart wallets`);
+        filteredOut.push({ name: pool.name, reason: "PVP symbol conflict with no smart-wallet confirmation" });
         return false;
       }
       return true;
@@ -1236,7 +1264,7 @@ function getDeterministicCloseRule(position, managementConfig) {
   if (
     position.fee_per_tvl_24h != null &&
     position.fee_per_tvl_24h < managementConfig.minFeePerTvl24h &&
-    (position.age_minutes ?? 0) >= 60
+    (position.age_minutes ?? 0) >= (managementConfig.minAgeBeforeYieldCheck ?? 60)
   ) {
     return { action: "CLOSE", rule: 5, reason: "low yield", exit_reason: "low_yield" };
   }
