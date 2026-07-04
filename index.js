@@ -617,6 +617,24 @@ Screening skipped — max positions reached (${prePositions.total_positions}/${c
     }
     const minRequired = config.management.deployAmountSol + config.management.gasReserve;
     const isDryRun = process.env.DRY_RUN === "true";
+
+    // If wallet balance fetch failed (e.g. 502), don't send misleading "low SOL" warning
+    if (preBalance.error) {
+      log("cron_warn", `Wallet balance fetch error: ${preBalance.error} — skipping low-SOL check`);
+      if (!silent && telegramEnabled()) {
+        await sendMessage(`⚠️ Gagal cek saldo wallet: ${preBalance.error}. Screening dilewati sementara.`).catch(() => {});
+      }
+      screenReport = `Screening skipped — wallet balance fetch failed: ${preBalance.error}.`;
+      appendDecision({
+        type: "skip",
+        actor: "SCREENER",
+        summary: "Screening skipped",
+        reason: `Wallet balance fetch error: ${preBalance.error}`,
+      });
+      _screeningBusy = false;
+      return screenReport;
+    }
+
     if (preBalance.sol < minRequired) {
       log("cron", `Screening note — low SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas) [dry_run=${isDryRun}]`);
       if (!silent && telegramEnabled()) {
@@ -1525,6 +1543,7 @@ function settingValue(key) {
     stopLossPct: config.management.stopLossPct,
     trailingTriggerPct: config.management.trailingTriggerPct,
     trailingDropPct: config.management.trailingDropPct,
+    trailTiers: config.management.trailTiers,
     repeatDeployCooldownEnabled: config.management.repeatDeployCooldownEnabled,
     repeatDeployCooldownTriggerCount: config.management.repeatDeployCooldownTriggerCount,
     repeatDeployCooldownHours: config.management.repeatDeployCooldownHours,
@@ -1614,15 +1633,15 @@ function renderSettingsMenu(page = "main") {
   let rows;
   if (page === "risk") {
     rows = [
-      stepButtons("deployAmountSol", "Deploy", 0.1),
-      stepButtons("gasReserve", "Gas", 0.05),
-      stepButtons("maxPositions", "Max pos", 1, { digits: 0 }),
-      stepButtons("maxDeployAmount", "Max SOL", 1, { digits: 0 }),
-      stepButtons("takeProfitPct", "TP %", 1, { digits: 0 }),
-      stepButtons("stopLossPct", "SL %", 5, { digits: 0 }),
+      inputButton("deployAmountSol", "Deploy", { digits: 2 }),
+      inputButton("gasReserve", "Gas", { digits: 2 }),
+      inputButton("maxPositions", "Max pos", { digits: 0 }),
+      inputButton("maxDeployAmount", "Max SOL", { digits: 0 }),
+      inputButton("takeProfitPct", "TP %", { digits: 1 }),
+      inputButton("stopLossPct", "SL %", { digits: 1 }),
       [toggleButton("trailingTakeProfit", "Trailing TP")],
-      stepButtons("trailingTriggerPct", "Trail trigger", 0.5, { digits: 1 }),
-      stepButtons("trailingDropPct", "Trail drop", 0.5, { digits: 1 }),
+      inputButton("trailingTriggerPct", "Trail trigger", { digits: 1 }),
+      inputButton("trailingDropPct", "Trail drop", { digits: 1 }),
       inputButton("trailTiers", "Trail tiers (act:drop,…)"),
       [toggleButton("repeatDeployCooldownEnabled", "Repeat cooldown")],
       inputButton("repeatDeployCooldownTriggerCount", "Repeat count"),

@@ -328,7 +328,8 @@ export async function pushHiveLesson(lesson) {
  * @param {string} [closeReason] - Free-text close_reason (fallback)
  */
 export function shouldCountInAdjustedWinRate(exitReason, closeReason) {
-  if (exitReason === "oor" || exitReason === "oor_above" || exitReason === "oor_below") return false;
+  // OOR below (price dump) is a real loss — count it in adjusted win rate.
+  if (exitReason === "oor" || exitReason === "oor_above") return false;
   const text = String(closeReason || "").toLowerCase();
   return !(
     text.includes("out of range") ||

@@ -53,7 +53,9 @@ function isOorCloseReason(deploy) {
  * OOR exits are excluded because they reflect range mechanics, not capital loss.
  */
 function isAdjustedWinRateExcludedReason(deploy) {
-  if (deploy.exit_reason === "oor" || deploy.exit_reason === "oor_above" || deploy.exit_reason === "oor_below") return true;
+  // Only OOR above (or generic oor) is a natural lifecycle — exclude from win rate.
+  // OOR below (price dump) IS a real loss, keep in adjusted win rate.
+  if (deploy.exit_reason === "oor" || deploy.exit_reason === "oor_above") return true;
   const text = String(deploy.close_reason || "").trim().toLowerCase();
   return text.includes("out of range") ||
     text.includes("pumped far above range") ||
@@ -158,7 +160,15 @@ export function recordPoolDeploy(poolAddress, deployData) {
   entry.deploys.push(deploy);
   entry.total_deploys = entry.deploys.length;
   entry.last_deployed_at = deploy.closed_at;
-  entry.last_outcome = (deploy.pnl_pct ?? 0) >= 0 ? "profit" : "loss";
+  // OOR above = price pumped beyond range — natural lifecycle, not a loss.
+  // OOR below = price dumped below range — that IS a loss sign, mark accordingly.
+  if (deploy.exit_reason === "oor" || deploy.exit_reason === "oor_above") {
+    entry.last_outcome = (deploy.pnl_pct ?? 0) >= 0 ? "profit" : "oor";
+  } else if (deploy.exit_reason === "oor_below") {
+    entry.last_outcome = (deploy.pnl_pct ?? 0) >= 0 ? "profit" : "loss";
+  } else {
+    entry.last_outcome = (deploy.pnl_pct ?? 0) >= 0 ? "profit" : "loss";
+  }
 
   // Recompute aggregates
   const withPnl = entry.deploys.filter((d) => d.pnl_pct != null);
@@ -379,7 +389,19 @@ export function recallForPool(poolAddress) {
 
   // Deploy history summary
   if (entry.total_deploys > 0) {
-    lines.push(`POOL MEMORY [${entry.name}]: ${entry.total_deploys} past deploy(s), avg PnL ${entry.avg_pnl_pct}%, win rate ${entry.win_rate}%, last outcome: ${entry.last_outcome}`);
+    const wr = (entry.adjusted_win_rate_sample_count > 0 ? entry.adjusted_win_rate : entry.win_rate);
+    const wrLabel = entry.adjusted_win_rate_sample_count > 0 ? "adj win rate" : "win rate";
+    lines.push(`POOL MEMORY [${entry.name}]: ${entry.total_deploys} past deploy(s), avg PnL ${entry.avg_pnl_pct}%, ${wrLabel} ${wr}%, last outcome: ${entry.last_outcome}`);
+    // Show exit reason breakdown to distinguish OOR above (natural pump) from real losses
+    const exitCounts = {};
+    for (const d of entry.deploys) {
+      const er = d.exit_reason || "unknown";
+      exitCounts[er] = (exitCounts[er] || 0) + 1;
+    }
+    const exitParts = Object.entries(exitCounts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([reason, count]) => `${count}x ${reason}`);
+    if (exitParts.length > 0) lines.push(`  EXITS: ${exitParts.join(", ")}`);
   }
 
   if (entry.cooldown_until && new Date(entry.cooldown_until) > new Date()) {

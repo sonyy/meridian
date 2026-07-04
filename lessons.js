@@ -225,10 +225,14 @@ function derivLesson(perf) {
     : 0;
 
   // Categorize outcome
-  const outcome = perf.pnl_pct >= 5 ? "good"
-    : (perf.pnl_pct >= 0 && feeYieldPct >= 2) ? "good"
-    : perf.pnl_pct >= 0 ? "neutral"
-    : perf.pnl_pct >= -5 ? "poor"
+  // OOR above = price pump, natural lifecycle, not a strategy failure.
+  // OOR below = price dump, IS a loss — no adjustment.
+  const isOorAbove = perf.exit_reason === "oor" || perf.exit_reason === "oor_above";
+  const adjustedPnl = isOorAbove ? perf.pnl_pct + 2 : perf.pnl_pct; // +2% buffer for OOR above exits
+  const outcome = adjustedPnl >= 5 ? "good"
+    : (adjustedPnl >= 0 && feeYieldPct >= 2) ? "good"
+    : adjustedPnl >= 0 ? "neutral"
+    : adjustedPnl >= -5 ? "poor"
     : "bad";
 
   if (outcome === "neutral") return null; // nothing interesting to learn
@@ -255,7 +259,8 @@ function derivLesson(perf) {
   let rule = "";
 
   if (outcome === "good" || outcome === "bad") {
-    if (perf.range_efficiency < 30 && outcome === "bad") {
+    // Don't penalize OOR-based range efficiency — being closed for being OOR is circular logic
+    if (perf.range_efficiency < 30 && outcome === "bad" && !isOorAbove) {
       rule = `AVOID: ${perf.pool_name}-type pools (volatility=${perf.volatility}, bin_step=${perf.bin_step}) with strategy="${perf.strategy}" — went OOR ${100 - perf.range_efficiency}% of the time. Consider wider bin_range or bid_ask strategy.`;
       tags.push("oor", perf.strategy, `volatility_${Math.round(perf.volatility)}`);
     } else if (perf.range_efficiency > 80 && outcome === "good") {
@@ -282,11 +287,9 @@ function derivLesson(perf) {
     feeYieldPct >= 1 ||
     (perf.fees_earned_usd || 0) >= 3 ||
     perf.pnl_pct >= 3;
-  const isOorExit = exitReason === "oor" || exitReason === "oor_above" || exitReason === "oor_below" || closeReasonText.includes("out of range") || closeReasonText.includes("oor");
   const negativeEvidence =
     perf.pnl_pct <= -5 ||
     perf.range_efficiency <= 30 ||
-    isOorExit ||
     exitReason === "low_yield" || closeReasonText.includes("low yield") ||
     closeReasonText.includes("volume");
 

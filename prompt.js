@@ -125,7 +125,7 @@ NARRATIVE QUALITY (your main judgment call):
 - BAD: generic hype ("next 100x", "community token") with no identifiable subject
 - Smart wallets present → can override weak narrative
 
-POOL MEMORY: Past losses or problems → strong skip signal.
+POOL MEMORY: Past losses (especially stop_loss, low_yield) → strong skip signal. OOR (out of range) closes are a natural lifecycle event — the price moved out of your LP range, which can happen on both upside (price pump) and downside. OOR above (price went up) is NOT a loss: the position collected fees while in range. Use avg PnL and adj win rate to judge, not raw OOR count.
 
 POSITION POLARITY (read before judging entry timing):
 - This agent deploys SINGLE-SIDED SOL with bins_below only — the active bin sits at the TOP of the range. The position earns fees and accumulates the token as price trades DOWN into the liquidity; it goes out-of-range (all SOL, zero fees) on any UP move.
