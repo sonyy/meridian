@@ -882,6 +882,19 @@ export async function deployPosition({
       // a large position in a single initializePosition ix.
       // Solution: createExtendedEmptyPosition (returns Transaction | Transaction[]),
       //           then addLiquidityByStrategyChunkable (returns Transaction[]).
+      //
+      // SAFETY: Each Phase 2 tx is simulated BEFORE sending. If simulation fails,
+      // the empty position is closed immediately to reclaim rent. This prevents
+      // ghost positions where Phase 1 (create) committed on-chain but Phase 2
+      // (add liquidity) failed.
+
+      // Helper: set blockhash + fee payer and simulate without signature verification
+      const simulateTx = async (tx) => {
+        const { blockhash } = await getConnection().getLatestBlockhash();
+        tx.recentBlockhash = blockhash;
+        tx.feePayer = wallet.publicKey;
+        return getConnection().simulateTransaction(tx, { sigVerify: false });
+      };
 
       // Phase 1: Create empty position (may be multiple txs)
       const createTxs = await pool.createExtendedEmptyPosition(
@@ -891,6 +904,15 @@ export async function deployPosition({
         wallet.publicKey,
       );
       const createTxArray = Array.isArray(createTxs) ? createTxs : [createTxs];
+
+      // Simulate Phase 1 txs before sending
+      for (let i = 0; i < createTxArray.length; i++) {
+        const sim = await simulateTx(createTxArray[i]);
+        if (sim.value.err) {
+          throw new Error(`Phase 1 create tx ${i + 1}/${createTxArray.length} simulation failed: ${JSON.stringify(sim.value.err)}`);
+        }
+      }
+
       for (let i = 0; i < createTxArray.length; i++) {
         const signers = i === 0 ? [wallet, newPosition] : [wallet];
         const txHash = await sendAndConfirmTransaction(getConnection(), createTxArray[i], signers);
@@ -908,6 +930,26 @@ export async function deployPosition({
         slippage: 10, // 10%
       });
       const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
+
+      // Simulate Phase 2 txs BEFORE sending — if any fails, close empty position
+      for (let i = 0; i < addTxArray.length; i++) {
+        const sim = await simulateTx(addTxArray[i]);
+        if (sim.value.err) {
+          log("deploy", `Add liquidity tx ${i + 1}/${addTxArray.length} SIMULATION FAILED — closing empty position to reclaim rent.`);
+          try {
+            const closeTx = await pool.closePosition({
+              owner: wallet.publicKey,
+              position: { publicKey: newPosition.publicKey },
+            });
+            await sendAndConfirmTransaction(getConnection(), closeTx, [wallet]);
+            log("deploy", `Empty position ${newPosition.publicKey.toString()} closed after simulation failure.`);
+          } catch (closeErr) {
+            log("deploy_warn", `Cleanup close of empty position failed: ${closeErr.message}. User may need to close manually.`);
+          }
+          throw new Error(`Phase 2 add liquidity tx ${i + 1}/${addTxArray.length} simulation failed: ${JSON.stringify(sim.value.err)}`);
+        }
+      }
+
       for (let i = 0; i < addTxArray.length; i++) {
         const txHash = await sendAndConfirmTransaction(getConnection(), addTxArray[i], [wallet]);
         txHashes.push(txHash);
@@ -1234,7 +1276,7 @@ async function fetchRawOpenPositionsFromMeridian({ walletAddress, agentId }) {
 }
 
 // ─── Get My Positions ──────────────────────────────────────────
-export async function getMyPositions({ force = false, silent = false, wallet_address = null } = {}) {
+export async function getMyPositions({ force = false, silent = false, wallet_address = null, useMeteoraApi = false } = {}) {
   let walletOverride = null;
   try {
     walletOverride = wallet_address ? new PublicKey(wallet_address).toString() : null;
@@ -1256,7 +1298,7 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
   }
 
   const loadPositions = async () => { try {
-    if (config.pnl.source === "rpc") {
+    if (config.pnl.source === "rpc" && !useMeteoraApi) {
       try {
         if (!silent) log("positions", `Computing PnL from RPC (${config.pnl.rpcUrl})...`);
         const rpcResult = await computePositions(walletAddress);
@@ -1331,7 +1373,7 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
         positions.push({
           position:           positionAddress,
           pool:               pool.poolAddress,
-          pair:               tracked?.pool_name || `${pool.tokenX}/${pool.tokenY}`,
+          pair:               tracked?.pool_name || `${pool.tokenX || "?"}/${pool.tokenY || "SOL"}`,
           base_mint:          pool.tokenXMint,
           lower_bin:          lowerBin,
           upper_bin:          upperBin,
@@ -1415,6 +1457,31 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
           minutes_out_of_range: minutesOutOfRange(positionAddress),
           instruction:        tracked?.instruction ?? null,
         });
+      }
+    }
+
+    // Resolve unresolved token symbols (?) from mint addresses via Jupiter API
+    const unresolved = positions.filter(p => p.pair.includes("?/") || p.pair.includes("undefined"));
+    if (unresolved.length > 0) {
+      const mints = [...new Set(unresolved.map(p => p.base_mint).filter(Boolean))];
+      if (mints.length > 0) {
+        try {
+          const jupRes = await fetch(`https://datapi.jup.ag/v1/assets/search?query=${mints.join(",")}`, {
+            headers: { accept: "application/json" },
+          });
+          if (jupRes.ok) {
+            const assets = await jupRes.json();
+            const symMap = {};
+            for (const a of assets) symMap[a.id] = a.symbol || a.name;
+            for (const p of positions) {
+              if ((p.pair.includes("?/") || p.pair.includes("undefined")) && p.base_mint && symMap[p.base_mint]) {
+                p.pair = `${symMap[p.base_mint]}/SOL`;
+              }
+            }
+          }
+        } catch (e) {
+          log("positions_warn", `Symbol resolution failed: ${e.message}`);
+        }
       }
     }
 
@@ -2232,7 +2299,7 @@ async function lookupPoolForPosition(position_address, walletAddress) {
     new PublicKey(walletAddress)
   );
 
-  for (const [lbPairKey, positionData] of Object.entries(allPositions)) {
+  for (const [lbPairKey, positionData] of allPositions.entries()) {
     for (const pos of positionData.lbPairPositionsData || []) {
       if (pos.publicKey.toString() === position_address) return lbPairKey;
     }

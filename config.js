@@ -113,6 +113,7 @@ export const config = {
     blockedLaunchpads:  u.blockedLaunchpads  ?? [],  // e.g. ["letsbonk.fun", "pump.fun"]
     minTokenAgeHours:   u.minTokenAgeHours   ?? null, // null = no minimum
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? null, // null = no maximum
+    deterministicDeploy: u.deterministicDeploy ?? false, // skip LLM, deploy to best candidate directly
   },
 
   gmgn: {
@@ -170,6 +171,8 @@ export const config = {
       ...(gmgnUserConfig.indicatorParams || {}),
     },
     indicatorInterval: gmgnValue("indicatorInterval", "gmgnIndicatorInterval", "15_MINUTE"),
+    indicatorIntervals: gmgnArray("indicatorIntervals", "gmgnIndicatorIntervals", ["5_MINUTE", "15_MINUTE"]),
+    requireAllIndicatorIntervals: gmgnValue("requireAllIndicatorIntervals", "gmgnRequireAllIndicatorIntervals", true),
     indicatorRules: (() => {
       const r = gmgnUserConfig.indicatorRules || {};
       return {

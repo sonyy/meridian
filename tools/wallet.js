@@ -108,17 +108,36 @@ export async function getWalletBalances() {
       total_usd: Math.round((data.totalUsdValue || 0) * 100) / 100,
     };
   } catch (error) {
-    log("wallet_error", error.message);
-    return {
-      wallet: walletAddress,
-      sol: 0,
-      sol_price: 0,
-      sol_usd: 0,
-      usdc: 0,
-      tokens: [],
-      total_usd: 0,
-      error: error.message,
-    };
+    log("wallet_error", `Helius REST API failed (${error.message}), trying RPC fallback...`);
+    try {
+      const balanceLamports = await getConnection().getBalance(
+        new (await import("@solana/web3.js")).PublicKey(walletAddress)
+      );
+      const solBalance = balanceLamports / 1e9;
+      log("wallet", `RPC fallback balance: ${solBalance} SOL`);
+      return {
+        wallet: walletAddress,
+        sol: Math.round(solBalance * 1e6) / 1e6,
+        sol_price: 0,
+        sol_usd: 0,
+        usdc: 0,
+        tokens: [],
+        total_usd: 0,
+        _fallback: true,
+      };
+    } catch (rpcError) {
+      log("wallet_error", `RPC fallback also failed: ${rpcError.message}`);
+      return {
+        wallet: walletAddress,
+        sol: 0,
+        sol_price: 0,
+        sol_usd: 0,
+        usdc: 0,
+        tokens: [],
+        total_usd: 0,
+        error: error.message,
+      };
+    }
   }
 }
 

@@ -231,14 +231,17 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             attempt -= 1;
             continue;
           }
-          if (toolChoice === "required" && isToolChoiceRequiredError(error)) {
+          const httpStatus = error.status || (error.message ? parseInt(error.message) : 0);
+          // Some providers (free models, rate-limited endpoints) reject tool_choice=required
+          // with a generic 4xx/5xx instead of a specific "tool_choice" error message.
+          // Fall back to auto mode immediately to keep the loop efficient.
+          if (toolChoice === "required" && (httpStatus === 429 || httpStatus === 400 || isToolChoiceRequiredError(error))) {
             toolChoice = "auto";
-            log("agent", "Provider rejected tool_choice=required — retrying with tool_choice=auto");
+            log("agent", `Provider rejected tool_choice=required (HTTP ${httpStatus}) — retrying with tool_choice=auto`);
             attempt -= 1;
             continue;
           }
-          const httpStatus = error.status || (error.message ? parseInt(error.message) : 0);
-          if (httpStatus === 404 || httpStatus === 502 || httpStatus === 503 || httpStatus === 529) {
+          if (httpStatus === 404 || httpStatus === 429 || httpStatus === 502 || httpStatus === 503 || httpStatus === 529) {
             modelIdx++;
             if (modelIdx < modelChain.length) {
               usedModel = modelChain[modelIdx];

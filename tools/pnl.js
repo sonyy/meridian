@@ -75,17 +75,21 @@ export async function fetchDlmmPnlForPool(poolAddress, walletAddress) {
 
 async function getJupiterPrices(mints) {
   const list = unique(mints.map((m) => String(m).trim()));
-  if (!list.length) return {};
+  if (!list.length) return { prices: {}, symbols: {} };
   try {
     const res = await fetch(`${JUP_SEARCH}?query=${list.join(",")}`, { headers: { accept: "application/json" } });
     if (!res.ok) throw new Error(`Jupiter ${res.status}`);
     const assets = await res.json();
-    const out = {};
-    for (const a of assets) out[a.id] = maybeNum(a.usdPrice);
-    return out;
+    const prices = {};
+    const symbols = {};
+    for (const a of assets) {
+      prices[a.id] = maybeNum(a.usdPrice);
+      symbols[a.id] = a.symbol || a.name || null;
+    }
+    return { prices, symbols };
   } catch (e) {
     log("pnl_price", `Jupiter price fetch failed: ${e.message}`);
-    return {};
+    return { prices: {}, symbols: {} };
   }
 }
 
@@ -185,7 +189,7 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
   return {
     position:           f.position,
     pool:               f.pool,
-    pair:               tracked?.pool_name || (meteora ? `${meteora.tokenX ?? "?"}/${meteora.tokenY ?? "SOL"}` : "?/SOL"),
+    pair:               tracked?.pool_name || (meteora ? `${meteora.tokenX || f.tokenXSymbol || "?"}/${meteora.tokenY || "SOL"}` : `${f.tokenXSymbol || "?"}/SOL`),
     base_mint:          f.baseMint,
     lower_bin:          f.lower ?? tracked?.bin_range?.min ?? null,
     upper_bin:          f.upper ?? tracked?.bin_range?.max ?? null,
@@ -246,11 +250,14 @@ export async function computePositions(walletAddress) {
     return { wallet: walletAddress, total_positions: 0, positions: [], source: "rpc" };
   }
 
-  const [prices, meteoraByPosition] = await Promise.all([
+  const [{ prices, symbols }, meteoraByPosition] = await Promise.all([
     getJupiterPrices([SOL_MINT, ...flat.map((f) => f.baseMint)]),
     getMeteoraData(conn, walletAddress, flat),
   ]);
   const solUsd = prices[SOL_MINT] ?? null;
+  for (const f of flat) {
+    f.tokenXSymbol = f.baseMint ? (symbols[f.baseMint] || null) : null;
+  }
 
   const positions = flat.map((f) => buildPosition(f, prices, solUsd, meteoraByPosition[f.position], solMode));
 

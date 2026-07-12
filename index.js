@@ -99,9 +99,9 @@ let _screeningLastTriggered = 0; // epoch ms — prevents management from spammi
 let _pollTriggeredAt = 0; // epoch ms — cooldown for poller-triggered management
 const _peakConfirmTimers = new Map();
 const _trailingDropConfirmTimers = new Map();
-const TRAILING_PEAK_CONFIRM_DELAY_MS = 15_000;
+const TRAILING_PEAK_CONFIRM_DELAY_MS = 6_000;
 const TRAILING_PEAK_CONFIRM_TOLERANCE = 0.85;
-const TRAILING_DROP_CONFIRM_DELAY_MS = 15_000;
+const TRAILING_DROP_CONFIRM_DELAY_MS = 6_000;
 const TRAILING_DROP_CONFIRM_TOLERANCE_PCT = 1.0;
 
 /** Strip <think>...</think> reasoning blocks that some models leak into output */
@@ -554,8 +554,9 @@ After executing, write a brief one-line result per position.
     if (!silent && telegramEnabled()) {
       if (mgmtReport) {
         log("cron", `📨 mgmt report (${mgmtReport.length}c): ${JSON.stringify(stripThink(mgmtReport)).slice(0, 500)}`);
+        const mgmtHtml = stripThink(mgmtReport).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
         if (liveMessage) liveMessage.finalize(stripThink(mgmtReport)).catch(() => {});
-        else sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
+        else sendHTML(`🔄 <b>Management Cycle</b>\n\n${mgmtHtml}`).catch(() => { });
       }
       for (const p of positions) {
         if (!p._is_virtual && !p.in_range && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes) {
@@ -901,7 +902,106 @@ Screening skipped — max positions reached (${prePositions.total_positions}/${c
     let deployAttempted = false;
     let deploySucceeded = false;
     let deployFailReason = null;
-    const { content } = await Promise.race([agentLoop(`
+    let content;
+
+    if (config.screening.deterministicDeploy && passing.length > 0) {
+      // ── Deterministic deploy: bypass LLM, deploy directly to best candidate ──
+      const best = passing[0];
+      const bestPool = best.pool;
+      const rawBinsBelow = Math.round(
+        config.strategy.minBinsBelow +
+          ((bestPool.volatility || 0) / 5) *
+            (config.strategy.maxBinsBelow - config.strategy.minBinsBelow)
+      );
+      const binsBelow = Math.max(
+        config.strategy.minBinsBelow,
+        Math.min(config.strategy.maxBinsBelow, rawBinsBelow)
+      );
+      const deployArgs = {
+        pool_address: bestPool.pool,
+        amount_y: deployAmount,
+        amount_x: 0,
+        strategy: config.strategy.strategy,
+        bins_below: binsBelow,
+        bins_above: 0,
+        pool_name: bestPool.name,
+        base_mint: bestPool.base?.mint || bestPool.base_mint || best.ti?.mint || undefined,
+        bin_step: bestPool.bin_step,
+        base_fee: bestPool.fee_pct,
+        volatility: bestPool.volatility,
+        fee_tvl_ratio: bestPool.fee_active_tvl_ratio,
+        organic_score: bestPool.organic_score,
+        initial_value_usd: deployAmount * (currentBalance.sol_price_usd || 0),
+      };
+
+      deployAttempted = true;
+      await liveMessage?.toolStart("deploy_position");
+      const deployResult = await executeTool("deploy_position", deployArgs);
+      deploySucceeded = Boolean(deployResult?.success !== false && !deployResult?.error && !deployResult?.blocked);
+      if (!deploySucceeded && deployResult?.reason) deployFailReason = deployResult.reason;
+      await liveMessage?.toolFinish("deploy_position", deployResult, deploySucceeded);
+
+      if (deploySucceeded) {
+        const minP = deployResult?.min_price ?? "?";
+        const maxP = deployResult?.max_price ?? "?";
+        const downside = deployResult?.range_coverage?.downside_pct ?? "?";
+        const upside = deployResult?.range_coverage?.upside_pct ?? "?";
+        const width = deployResult?.range_coverage?.width_pct ?? "?";
+        const activeBin = deployResult?.active_bin ?? activeBinResults[0]?.value?.binId ?? "?";
+        const swLine = best.sw?.in_pool?.length
+          ? `Smart wallets: ${best.sw.in_pool.map(w => w.name).join(", ")}`
+          : "Smart wallets: none";
+        const botPct = best.ti?.audit?.bot_holders_pct ?? "?";
+        const top10Pct = best.ti?.audit?.top_holders_pct ?? "?";
+        const feesSol = best.ti?.global_fees_sol ?? "?";
+        const tvl = bestPool.tvl || bestPool.active_tvl;
+
+        content = [
+          "🚀 DEPLOYED",
+          "",
+          `${bestPool.name}`,
+          `${bestPool.pool}`,
+          "",
+          `◎ ${deployAmount} SOL | ${config.strategy.strategy} | bin ${activeBin}`,
+          `Range: ${minP} → ${maxP}`,
+          `Range cover: ${downside}% downside | ${upside}% upside | ${width}% total`,
+          "",
+          "MARKET",
+          `Fee/TVL: ${((bestPool.fee_active_tvl_ratio ?? 0) * 100).toFixed(2)}%`,
+          `Volume: $${bestPool.volume_window?.toLocaleString?.() ?? bestPool.volume_window ?? "?"}`,
+          `TVL: $${tvl?.toLocaleString?.() ?? tvl ?? "?"}`,
+          `Volatility: ${bestPool.volatility ?? "?"}`,
+          `Organic: ${bestPool.organic_score ?? "?"}`,
+          `Mcap: $${bestPool.mcap?.toLocaleString?.() ?? bestPool.mcap ?? "?"}`,
+          `Age: ${bestPool.token_age_hours ?? "?"}h`,
+          "",
+          "AUDIT",
+          `Top10: ${top10Pct}%`,
+          `Bots: ${botPct}%`,
+          `Fees paid: ${feesSol} SOL`,
+          swLine,
+          "",
+          "WHY THIS WON",
+          `Best scoring candidate after deterministic filtering (${passing.length} passed).`,
+        ].join("\n");
+      } else {
+        content = [
+          "⛔ NO DEPLOY",
+          "",
+          "Cycle finished with no valid entry.",
+          "",
+          "BEST LOOKING CANDIDATE",
+          bestPool.name,
+          "",
+          "WHY SKIPPED",
+          `Deterministic deploy failed: ${deployFailReason || "unknown error"}`,
+          "",
+          "REJECTED",
+          `- ${bestPool.name}: deploy error — ${deployFailReason || "unknown"}`,
+        ].join("\n");
+      }
+    } else {
+      const agentResult = await Promise.race([agentLoop(`
 SCREENING CYCLE
 ${strategyBlock}
 Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL
@@ -980,8 +1080,10 @@ IMPORTANT:
           await liveMessage?.toolFinish(name, result, success);
         },
       }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("agentLoop timed out after 7 min")), 420000)),
-    ]);
+        new Promise((_, reject) => setTimeout(() => reject(new Error("agentLoop timed out after 7 min")), 420000)),
+      ]);
+      content = agentResult.content;
+    }
     const funnelAppend = buildGmgnFunnelReport(gmgnStageCounts, gmgnAllFiltered, { fromStage: 2 });
     screenReport = funnelAppend ? `${content}\n\n─────────────\n${funnelAppend}` : content;
     if (/⛔\s*NO DEPLOY/i.test(content)) {
@@ -1116,7 +1218,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
       if (isVirtualMode()) {
         pollPositions = getVirtualPositionsAsReal();
       } else {
-        const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
+        const result = await getMyPositions({ force: true, silent: true, useMeteoraApi: true }).catch(() => null);
         pollPositions = result?.positions ?? [];
       }
       if (!pollPositions.length) return;
@@ -1169,7 +1271,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
     } finally {
       _pnlPollBusy = false;
     }
-  }, 30_000);
+  }, 3_000);
 
   _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog];
   // Store interval ref so stopCronJobs can clear it
@@ -2083,12 +2185,17 @@ async function telegramHandler(msg) {
       if (total_positions === 0) { await sendMessage("No open positions."); return; }
       const cur = config.management.solMode ? "◎" : "$";
       const lines = positions.map((p, i) => {
-        const pnl = p.pnl_usd >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
-        const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
-        const oor = !p.in_range ? " ⚠️OOR" : "";
-        return `${i + 1}. ${p.pair} | ${cur}${p.total_value_usd} | PnL: ${pnl} | fees: ${cur}${p.unclaimed_fees_usd} | ${age}${oor}`;
+        const pnlSign = p.pnl_pct >= 0 ? "+" : "";
+        const pnlStr = `${pnlSign}${p.pnl_pct ?? "?"}%`;
+        const valueStr = `${cur}${p.total_value_usd ?? "?"}`;
+        const feeStr = `${cur}${p.unclaimed_fees_usd ?? "?"}`;
+        const yieldStr = p.fee_per_tvl_24h != null ? `${p.fee_per_tvl_24h}%` : "?";
+        const ageStr = p.age_minutes != null ? `${p.age_minutes}m` : "?";
+        const inRangeStr = p.in_range ? "🟢 IN" : `🔴 OOR ${p.minutes_out_of_range ?? 0}m`;
+        const instrNote = p.instruction ? `\n📝 <i>${p.instruction.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</i>` : "";
+        return `<b>${i + 1}. ${p.pair}</b>\nValue: ${valueStr} | PnL: ${pnlStr} | fees: ${feeStr} | Yield: ${yieldStr} | ⏱ ${ageStr} | ${inRangeStr}${instrNote}`;
       });
-      await sendMessage(`📊 Open Positions (${total_positions}):\n\n${lines.join("\n")}\n\n/close <n> to close | /set <n> <note> to set instruction`);
+      await sendHTML(`📊 <b>Open Positions (${total_positions})</b>:\n\n${lines.join("\n\n")}\n\n/close &lt;n&gt; to close | /set &lt;n&gt; &lt;note&gt; to set instruction`);
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }

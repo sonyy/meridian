@@ -392,8 +392,8 @@ function condenseGmgnCandidate({ token, pool, poolDetail, security, info, infoAn
 // Token dumps down through bins (fees collected) then bounces back up (more fees).
 // Need: (1) token not already at bottom — needs room to dump into range,
 //        (2) overall bullish trend — guarantees the bounce back.
-async function checkBounceSetup(mint) {
-  const interval = String(config.gmgn.indicatorInterval || "15_MINUTE").trim().toUpperCase();
+async function checkBounceSetup(mint, overrideInterval) {
+  const interval = overrideInterval || String(config.gmgn.indicatorInterval || "15_MINUTE").trim().toUpperCase();
   const payload = await fetchChartIndicatorsForMint(mint, { interval });
   const latest = payload?.latest || {};
   const st = latest?.supertrend || {};
@@ -543,23 +543,36 @@ export async function discoverGmgnPools({ limit = 10 } = {}) {
   stageCounts.s3 = s3.length;
   log("gmgn", `Stage3 pool: ${s2.length} → ${s3.length} pass`);
 
-  // ── Stage 4: Meridian chart indicators ────────────────────────────────────
+  // ── Stage 4: Chart indicators (5m + 15m multi-interval) ───────────────────
   const s4 = [];
   if (g.indicatorFilter !== false) {
     for (const entry of s3) {
       const mint = entry.token.address;
-      let indicatorCheck;
-      try {
-        indicatorCheck = await checkBounceSetup(mint);
-      } catch (error) {
-        log("gmgn", `Stage4 indicator unavailable for ${entry.token.symbol || mint}: ${error.message} — skip filter`);
-        indicatorCheck = { passed: true, reasons: [] };
+      const intervals = config.gmgn.indicatorIntervals?.length ? config.gmgn.indicatorIntervals : ["5_MINUTE", "15_MINUTE"];
+      const requireAll = !!config.gmgn.requireAllIndicatorIntervals;
+      const results = [];
+      let indicatorSignal = null;
+
+      for (const interval of intervals) {
+        try {
+          const result = await checkBounceSetup(mint, interval);
+          results.push({ interval, passed: result.passed, reasons: result.reasons });
+          if (result.passed) indicatorSignal = result.signal;
+        } catch (error) {
+          log("gmgn", `Stage4 ${interval} unavailable for ${entry.token.symbol || mint}: ${error.message}`);
+        }
       }
-      if (!indicatorCheck.passed) {
-        filtered.push({ stage: 4, name: entry.token.symbol || mint, reason: indicatorCheck.reasons.join(", ") });
+
+      const passed = requireAll
+        ? results.every((r) => r.passed)
+        : results.some((r) => r.passed);
+
+      if (!passed) {
+        const failedReasons = results.filter((r) => !r.passed).map((r) => `[${r.interval}] ${r.reasons.join(", ")}`);
+        filtered.push({ stage: 4, name: entry.token.symbol || mint, reason: failedReasons.join("; ") });
         continue;
       }
-      s4.push({ ...entry, indicatorSignal: indicatorCheck.signal });
+      s4.push({ ...entry, indicatorSignal });
     }
   } else {
     s4.push(...s3);

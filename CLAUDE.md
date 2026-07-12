@@ -32,6 +32,23 @@ Autonomous DLMM liquidity provider agent for Meteora pools on Solana.
   cross-cutting invariants (lazy SDK load, ONCE_PER_SESSION tool locks,
   position-cache TTL, trailing-TP 15s recheck) that are easy to break.
 
+### ⚠️ Failure mode (learned from experience)
+
+**Before proposing ANY change — including answering "what should we do?" — you MUST:**
+
+1. **Check data first.** Read the relevant JSON state files (`lessons.json`,
+   `state.json`, `pool-memory.json`, `decision-log.json`) and cross-reference
+   with what you're about to claim. Do NOT extrapolate from code alone.
+2. **If user asks a question, answer the question.** Do not implement,
+   suggest, or config-change anything unless explicitly asked. A question is
+   not a request for action.
+3. **Zero config changes without analysis.** Do not touch `user-config.json`
+   or suggest threshold changes unless you have:
+   - Read the historical performance data that justifies the change
+   - Considered what other pools/positions would also be affected
+   - Verified the change wouldn't block profitable patterns
+4. **When unsure, say "saya perlu liat data dulu" before proposing anything.**
+
 ---
 
 ## Architecture
