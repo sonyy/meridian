@@ -897,12 +897,18 @@ export async function deployPosition({
       };
 
       // Phase 1: Create empty position (may be multiple txs)
-      const createTxs = await pool.createExtendedEmptyPosition(
-        minBinId,
-        maxBinId,
-        newPosition.publicKey,
-        wallet.publicKey,
-      );
+      let createTxs;
+      try {
+        createTxs = await pool.createExtendedEmptyPosition(
+          minBinId,
+          maxBinId,
+          newPosition.publicKey,
+          wallet.publicKey,
+        );
+      } catch (err) {
+        log("deploy_error", `Phase 1 createExtendedEmptyPosition failed for bins ${minBinId} to ${maxBinId} (${totalBins} bins): ${err.message}`);
+        throw new Error(`Wide range Phase 1 (createExtendedEmptyPosition) failed for bins ${minBinId} to ${maxBinId} (${totalBins} bins): ${err.message}`);
+      }
       const createTxArray = Array.isArray(createTxs) ? createTxs : [createTxs];
 
       // Simulate Phase 1 txs before sending
@@ -921,14 +927,20 @@ export async function deployPosition({
       }
 
       // Phase 2: Add liquidity (may be multiple txs)
-      const addTxs = await pool.addLiquidityByStrategyChunkable({
-        positionPubKey: newPosition.publicKey,
-        user: wallet.publicKey,
-        totalXAmount: totalXLamports,
-        totalYAmount: totalYLamports,
-        strategy: { minBinId, maxBinId, strategyType },
-        slippage: 10, // 10%
-      });
+      let addTxs;
+      try {
+        addTxs = await pool.addLiquidityByStrategyChunkable({
+          positionPubKey: newPosition.publicKey,
+          user: wallet.publicKey,
+          totalXAmount: totalXLamports,
+          totalYAmount: totalYLamports,
+          strategy: { minBinId, maxBinId, strategyType },
+          slippage: 1000, // 10% in bps
+        });
+      } catch (err) {
+        log("deploy_error", `Phase 2 addLiquidityByStrategyChunkable failed for bins ${minBinId} to ${maxBinId} with amounts ${finalAmountX} X, ${finalAmountY} Y: ${err.message}`);
+        throw new Error(`Wide range Phase 2 (addLiquidityByStrategyChunkable) failed for bins ${minBinId} to ${maxBinId} with amounts ${finalAmountX} X, ${finalAmountY} Y: ${err.message}`);
+      }
       const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
 
       // Simulate Phase 2 txs BEFORE sending — if any fails, close empty position

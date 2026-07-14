@@ -833,7 +833,6 @@ async function runSafetyChecks(name, args) {
           const solTrend = await checkSolSupertrend(stTf);
           if (!solTrend.bullish) {
             const parts = [];
-            if (solTrend.tf5m != null) parts.push(`5m:${solTrend.tf5m ? "🟢" : "🔴"}`);
             if (solTrend.tf15m != null) parts.push(`15m:${solTrend.tf15m ? "🟢" : "🔴"}`);
             log("screening", `SOL supertrend bearish (${parts.join(" ")}) at $${solTrend.price.toFixed(2)} — deploy blocked`);
             return {

@@ -32,6 +32,18 @@ Autonomous DLMM liquidity provider agent for Meteora pools on Solana.
   cross-cutting invariants (lazy SDK load, ONCE_PER_SESSION tool locks,
   position-cache TTL, trailing-TP 15s recheck) that are easy to break.
 
+---
+
+## ⚡ Communication Rules
+
+- **High-level only** — skip implementation details unless asked
+- **Bahasa manusia** — jangan pakai technical jargon yang tidak perlu
+- **Jawab yang ditanya** — kalau ditanya A, jawab A. Jangan ditambah B, C, D
+- **Singkat & padat** — 1-3 paragraf cukup untuk kebanyakan pertanyaan
+- **Contoh konkret** lebih baik dari penjelasan panjang
+- **Jangan output log mentah** — cukup bilang hasilnya, jangan paste seluruh output
+- **Kalau butuh aksi user, bilang eksplisit** — contoh: "Mau saya X?" atau "Tolong Y"
+
 ### ⚠️ Failure mode (learned from experience)
 
 **Before proposing ANY change — including answering "what should we do?" — you MUST:**

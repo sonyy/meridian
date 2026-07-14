@@ -240,31 +240,24 @@ function evaluatePreset(side, preset, payload) {
 // (the pullback hasn't already completed/broken down), and close>=supertrend (veto).
 // Degrades to a single-bar check when no `recent` series is present (meridian fallback).
 // Returns { confirmed, reason, signal5m, signal15m, degraded }.
-export function evaluateSupertrendBbExtension(payload5m, payload15m, params) {
-  const s5 = buildSignalSummary(payload5m);
+export function evaluateSupertrendBbExtension(payload15m, _unused, params) {
   const s15 = buildSignalSummary(payload15m);
   const lookbackBars = Math.max(1, Math.floor(params.lookbackBars) || 3);
   const tagBand = params.tagBand === "middle" ? "middle" : "upper";
   const floorBand = params.floorBand === "lower" ? "lower" : "middle";
-  const base = { signal5m: s5, signal15m: s15, degraded: false };
+  const base = { signal15m: s15, degraded: false };
 
-  // 1. HTF trend filter — 15m supertrend must be bullish (so the pullback recovers).
   if (s15.supertrendDirection !== "bullish") {
     return { ...base, confirmed: false, reason: `15m supertrend ${s15.supertrendDirection} (need bullish)` };
   }
-  // 2. Defensive veto — 5m close must be at/above its supertrend.
-  //    The upstream supertrendDirection / breakUp flag has been seen sticky from an earlier
-  //    candle after price already fell back through ST, so we only check the value directly.
-  if (s5.close != null && s5.supertrendValue != null && s5.close < s5.supertrendValue) {
-    return { ...base, confirmed: false, reason: `Veto: 5m close ${s5.close} < supertrend ${s5.supertrendValue}` };
+  if (s15.close != null && s15.supertrendValue != null && s15.close < s15.supertrendValue) {
+    return { ...base, confirmed: false, reason: `Veto: 15m close ${s15.close} < supertrend ${s15.supertrendValue}` };
   }
-  // 3. Floor — latest 5m close still above the floor band (pullback not yet completed).
-  const floorLevel = floorBand === "lower" ? s5.lowerBand : s5.middleBand;
-  if (s5.close == null || floorLevel == null || s5.close < floorLevel) {
-    return { ...base, confirmed: false, reason: `Below floor: 5m close ${s5.close} < ${floorBand} band ${floorLevel}` };
+  const floorLevel = floorBand === "lower" ? s15.lowerBand : s15.middleBand;
+  if (s15.close == null || floorLevel == null || s15.close < floorLevel) {
+    return { ...base, confirmed: false, reason: `Below floor: 15m close ${s15.close} < ${floorBand} band ${floorLevel}` };
   }
-  // 5. Extension — price high >= tag band within the lookback window
-  const recent = Array.isArray(payload5m?.recent) ? payload5m.recent : null;
+  const recent = Array.isArray(payload15m?.recent) ? payload15m.recent : null;
   let tagged = false;
   let degraded = false;
   if (recent && recent.length > 0) {
@@ -275,10 +268,10 @@ export function evaluateSupertrendBbExtension(payload5m, payload15m, params) {
     });
   } else {
     degraded = true;
-    const tagLevel = tagBand === "middle" ? s5.middleBand : s5.upperBand;
-    const rawHigh = payload5m?.latest?.candle?.high;
-    const high5 = rawHigh != null ? safeNum(rawHigh) : s5.close;
-    tagged = tagLevel != null && high5 != null && high5 >= tagLevel;
+    const tagLevel = tagBand === "middle" ? s15.middleBand : s15.upperBand;
+    const rawHigh = payload15m?.latest?.candle?.high;
+    const high = rawHigh != null ? safeNum(rawHigh) : s15.close;
+    tagged = tagLevel != null && high != null && high >= tagLevel;
   }
   if (!tagged) {
     return {
@@ -291,8 +284,8 @@ export function evaluateSupertrendBbExtension(payload5m, payload15m, params) {
   return {
     ...base, degraded, confirmed: true,
     reason: degraded
-      ? "Degraded confirm: 15m bullish + single-bar 5m upper-band tag above floor"
-      : `15m bullish + 5m tagged ${tagBand} band (last ${lookbackBars} bars), still above ${floorBand}`,
+      ? "Degraded confirm: 15m bullish + single-bar upper-band tag above floor"
+      : `15m bullish + tagged ${tagBand} band (last ${lookbackBars} bars), still above ${floorBand}`,
   };
 }
 
@@ -365,23 +358,20 @@ export async function confirmSupertrendBbExtension({ mint, refresh = false }) {
     floorBand: String(config.indicators.extensionFloorBand || "middle").toLowerCase(),
   };
   const results = [];
-  let p5 = null;
   let p15 = null;
-  for (const interval of ["5_MINUTE", "15_MINUTE"]) {
-    try {
-      const payload = await fetchIndicatorsWithFallback(mint, interval, { refresh });
-      if (interval === "5_MINUTE") p5 = payload; else p15 = payload;
-      results.push({
-        interval, ok: true, confirmed: null, reason: null,
-        signal: buildSignalSummary(payload), latest: payload?.latest || null,
-      });
-    } catch (error) {
-      log("indicators_warn", `BB-extension fetch failed for ${mint.slice(0, 8)} ${interval}: ${error.message}`);
-      results.push({ interval, ok: false, confirmed: null, reason: error.message, signal: null, latest: null });
-    }
+  try {
+    const payload = await fetchIndicatorsWithFallback(mint, "15_MINUTE", { refresh });
+    p15 = payload;
+    results.push({
+      interval: "15_MINUTE", ok: true, confirmed: null, reason: null,
+      signal: buildSignalSummary(payload), latest: payload?.latest || null,
+    });
+  } catch (error) {
+    log("indicators_warn", `BB-extension fetch failed for ${mint.slice(0, 8)} 15_MINUTE: ${error.message}`);
+    results.push({ interval: "15_MINUTE", ok: false, confirmed: null, reason: error.message, signal: null, latest: null });
   }
 
-  if (!p5 || !p15) {
+  if (!p15) {
     return {
       enabled: true, confirmed: true, skipped: true,
       preset: "supertrend_bb_extension", side: "entry",
@@ -390,12 +380,10 @@ export async function confirmSupertrendBbExtension({ mint, refresh = false }) {
     };
   }
 
-  const evaln = evaluateSupertrendBbExtension(p5, p15, params);
+  const evaln = evaluateSupertrendBbExtension(p15, p15, params);
   for (const r of results) {
     if (!r.ok) continue;
-    r.confirmed = r.interval === "15_MINUTE"
-      ? evaln.signal15m.supertrendDirection === "bullish"
-      : evaln.confirmed;
+    r.confirmed = evaln.signal15m.supertrendDirection === "bullish" && evaln.confirmed;
   }
   return {
     enabled: true, confirmed: !!evaln.confirmed, skipped: false,

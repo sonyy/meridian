@@ -52,22 +52,17 @@ async function checkInterval(interval) {
   };
 }
 
-export async function checkSolSupertrend(timeframe = 'both') {
-  const intervals = timeframe === '5m' ? ['5m'] : timeframe === '15m' ? ['15m'] : ['5m', '15m'];
-  const results = await Promise.all(intervals.map(checkInterval));
-
-  const tf5m = results.find(r => r.interval === '5m');
-  const tf15m = results.find(r => r.interval === '15m');
+export async function checkSolSupertrend(timeframe = '15m') {
+  const results = await Promise.all(['15m'].map(checkInterval));
+  const tf15m = results[0];
 
   return {
-    bullish: timeframe === 'both'
-      ? (tf5m?.bullish ?? true) && (tf15m?.bullish ?? true)
-      : results[0]?.bullish ?? true,
-    price: tf5m?.price ?? results[0]?.price ?? 0,
+    bullish: tf15m?.bullish ?? true,
+    price: tf15m?.price ?? 0,
     price15m: tf15m?.price ?? 0,
-    supertrend: tf5m?.supertrend ?? results[0]?.supertrend ?? 0,
+    supertrend: tf15m?.supertrend ?? 0,
     supertrend15m: tf15m?.supertrend ?? 0,
-    tf5m: tf5m?.bullish ?? null,
+    tf5m: null,
     tf15m: tf15m?.bullish ?? null,
   };
 }

@@ -1075,7 +1075,7 @@ IMPORTANT:
           if (name === "deploy_position") {
             deployAttempted = true;
             deploySucceeded = Boolean(success && result?.success !== false && !result?.error && !result?.blocked);
-            if (!deploySucceeded && result?.reason) deployFailReason = result.reason;
+            if (!deploySucceeded && (result?.reason || result?.error)) deployFailReason = result.reason || result.error;
           }
           await liveMessage?.toolFinish(name, result, success);
         },

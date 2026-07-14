@@ -548,7 +548,7 @@ export async function discoverGmgnPools({ limit = 10 } = {}) {
   if (g.indicatorFilter !== false) {
     for (const entry of s3) {
       const mint = entry.token.address;
-      const intervals = config.gmgn.indicatorIntervals?.length ? config.gmgn.indicatorIntervals : ["5_MINUTE", "15_MINUTE"];
+      const intervals = config.gmgn.indicatorIntervals?.length ? config.gmgn.indicatorIntervals : ["15_MINUTE"];
       const requireAll = !!config.gmgn.requireAllIndicatorIntervals;
       const results = [];
       let indicatorSignal = null;
