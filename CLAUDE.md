@@ -43,6 +43,7 @@ Autonomous DLMM liquidity provider agent for Meteora pools on Solana.
 - **Contoh konkret** lebih baik dari penjelasan panjang
 - **Jangan output log mentah** — cukup bilang hasilnya, jangan paste seluruh output
 - **Kalau butuh aksi user, bilang eksplisit** — contoh: "Mau saya X?" atau "Tolong Y"
+- **Direct tools untuk lookup sederhana** — cari identifier/konstan sederhana (grep, find constant) pakai tools langsung (`grep`, `read`), jangan spawn sub-agent. Sub-agent untuk search kompleks multi-repo, bukan lookup satu value.
 
 ### ⚠️ Failure mode (learned from experience)
 
@@ -60,6 +61,14 @@ Autonomous DLMM liquidity provider agent for Meteora pools on Solana.
    - Considered what other pools/positions would also be affected
    - Verified the change wouldn't block profitable patterns
 4. **When unsure, say "saya perlu liat data dulu" before proposing anything.**
+
+---
+
+## ⚡ Parallel Execution (multi-worker)
+
+Gunakan multiple worker secara paralel dalam mengerjakan task yang diberikan ke kamu. Kalau ada banyak langkah independen — baca beberapa file, cari di beberapa modul, analisis beberapa pool/token sekaligus — jalankan bersamaan, jangan serial satu per satu. Manfaatkan mekanisme sub-agent / parallel tool calls untuk throughput maksimal.
+
+> Catatan: di repo ini `.claude/settings.json` mem-block `run_in_background: true` via PreToolUse hook. Jadi paralelisme dilakukan lewat mekanisme sub-agent (spawn parallel agents), bukan background bash.
 
 ---
 
