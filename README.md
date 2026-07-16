@@ -20,39 +20,29 @@ Autonomous Meteora DLMM liquidity management agent for Solana. LLM-driven screen
 | Solana | @meteora-ag/dlmm | On-chain operations |
 | Database | SQLite | Positions registry |
 
-## Entry Points
+## Architecture
+
+```
+index.js (daemon)
+└─ agentLoop (ReAct: LLM ↔ tool)
+   ├─ SCREENER: finds pools, deploys
+   └─ MANAGER: evaluates positions, acts
+```
+
+**Critical invariants:**
+- Lazy SDK load (@meteora-ag/dlmm dynamic import)
+- ONCE_PER_SESSION locks for DEPLOY / SWAP / CLOSE
+- Position-cache TTL (5 min) + force: true for safety
+- Deterministic management (5 hard rules) + optional LLM
+
+## Getting Started
 
 ```bash
-# Full daemon (REPL + cron + Telegram)
-npm start
-
-# First-time setup wizard
-npm run setup
-
-# One-shot CLI operations
-node cli.js <command>
-
-# PM2 for always-on (VPS)
-npm run pm2:start
+git clone git@github.com:sonyy/meridian.git
+cd meridian
+npm install
+npm run setup  # First-run wizard
 ```
-
-## Commands
-
-```
-# Portfolio & Status
-/status /positions /balance /pool <addr>
-
-# Learning & Intelligence
-/lessons /study-pool <pool> /evolve /pool-compare <pair>
-
-# Management
-/screen /manage /close <n> /claim <position>
-
-# Discord listener (standalone)
-cd discord-listener && npm start
-```
-
-## Config
 
 Set `.env` (.gitignored):
 
@@ -70,20 +60,29 @@ Copy and edit:
 cp user-config.example.json user-config.json
 ```
 
-## Architecture
+### Entry Points
+
+```bash
+npm start          # Full daemon (REPL + cron + Telegram)
+npm run pm2:start  # PM2 for always-on (VPS)
+node cli.js <cmd>  # One-shot CLI operations
+```
+
+### Commands
 
 ```
-index.js (daemon)
-└─ agentLoop (ReAct: LLM ↔ tool)
-   ├─ SCREENER: finds pools, deploys
-   └─ MANAGER: evaluates positions, acts
-```
+# Portfolio & Status
+/status /positions /balance /pool <addr>
 
-**Critical invariants:**
-- Lazy SDK load (@meteora-ag/dlmm dynamic import)
-- ONCE_PER_SESSION locks for DEPLOY / SWAP / CLOSE
-- Position-cache TTL (5 min) + force: true for safety
-- Deterministic management (5 hard rules) + optional LLM
+# Learning & Intelligence
+/lessons /study-pool <pool> /evolve /pool-compare <pair>
+
+# Management
+/screen /manage /close <n> /claim <position>
+
+# Discord listener (standalone)
+cd discord-listener && npm start
+```
 
 ## Development
 
