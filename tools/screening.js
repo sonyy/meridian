@@ -115,9 +115,13 @@ function getRawPoolScreeningRejectReason(pool, s) {
   if (s.maxTvl != null && tvl > s.maxTvl) return `TVL ${tvl} above maxTvl ${s.maxTvl}`;
   if (binStep == null || binStep < s.minBinStep) return `bin_step ${binStep ?? "unknown"} below minBinStep ${s.minBinStep}`;
   if (binStep > s.maxBinStep) return `bin_step ${binStep} above maxBinStep ${s.maxBinStep}`;
-  if (!isUsableVolatility(volatility)) return `volatility ${volatility ?? "unknown"} unusable`;
+      if (!isUsableVolatility(volatility)) return `volatility ${volatility ?? "unknown"} unusable`;
+      if (s.maxVolatility != null && volatility > s.maxVolatility) return `volatility ${volatility} above maxVolatility ${s.maxVolatility}`;
   if (feeActiveTvlRatio == null || feeActiveTvlRatio < s.minFeeActiveTvlRatio) {
     return `fee/active-TVL ${feeActiveTvlRatio ?? "unknown"} below minFeeActiveTvlRatio ${s.minFeeActiveTvlRatio}`;
+  }
+  if (s.maxFeeActiveTvlRatio != null && feeActiveTvlRatio > s.maxFeeActiveTvlRatio) {
+    return `fee/active-TVL ${feeActiveTvlRatio} above maxFeeActiveTvlRatio ${s.maxFeeActiveTvlRatio}`;
   }
   if (baseOrganic == null || baseOrganic < s.minOrganic) {
     return `base organic ${baseOrganic ?? "unknown"} below minOrganic ${s.minOrganic}`;
@@ -624,8 +628,16 @@ export async function getTopCandidates({ limit = 10, occupiedPools, occupiedMint
         pushFilteredReason(filteredOut, p, `fee/active-TVL ${Number.isFinite(feeActiveTvlRatio) ? feeActiveTvlRatio : "unknown"} below minFeeActiveTvlRatio ${minFeeActiveTvlRatio}`);
         return false;
       }
+      if (Number.isFinite(minFeeActiveTvlRatio) && minFeeActiveTvlRatio > 0 && (!Number.isFinite(feeActiveTvlRatio) || feeActiveTvlRatio < minFeeActiveTvlRatio)) {
+        pushFilteredReason(filteredOut, p, `fee/active-TVL ${Number.isFinite(feeActiveTvlRatio) ? feeActiveTvlRatio : "unknown"} below minFeeActiveTvlRatio ${minFeeActiveTvlRatio}`);
+        return false;
+      }
       if (!isUsableVolatility(p.volatility)) {
         pushFilteredReason(filteredOut, p, `volatility ${p.volatility ?? "unknown"} unusable`);
+        return false;
+      }
+      if (p.volatility > config.screening.maxVolatility) {
+        pushFilteredReason(filteredOut, p, `volatility ${p.volatility} above maxVolatility ${config.screening.maxVolatility}`);
         return false;
       }
       if (occupiedPools.has(p.pool)) {

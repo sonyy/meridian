@@ -41,7 +41,7 @@ function appendParams(url, params = {}) {
   }
 }
 
-export async function gmgnFetch(pathname, { method = "GET", params = {}, body = null } = {}) {
+export async function gmgnFetch(pathname, { method = "GET", params = {}, body = null, timeoutMs = 20000 } = {}) {
   const baseUrl = String(config.gmgn?.baseUrl || "https://openapi.gmgn.ai").replace(/\/+$/, "");
   const url = new URL(`${baseUrl}${pathname}`);
   appendParams(url, {
@@ -53,35 +53,52 @@ export async function gmgnFetch(pathname, { method = "GET", params = {}, body = 
   const maxRetries = Math.max(0, Number(config.gmgn?.maxRetries ?? 2));
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     await paceGmgnRequest();
-    const res = await fetch(url, {
-      method,
-      headers: {
-        "X-APIKEY": getApiKey(),
-        "Content-Type": "application/json",
-      },
-      body: body ? JSON.stringify(body) : null,
-    });
-    const text = await res.text().catch(() => "");
-    let payload = {};
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      payload = text ? JSON.parse(text) : {};
-    } catch {
-      payload = { raw: text };
+      const res = await fetch(url, {
+        method,
+        headers: {
+          "X-APIKEY": getApiKey(),
+          "Content-Type": "application/json",
+        },
+        body: body ? JSON.stringify(body) : null,
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      const text = await res.text().catch(() => "");
+      let payload = {};
+      try {
+        payload = text ? JSON.parse(text) : {};
+      } catch {
+        payload = { raw: text };
+      }
+      const message = payload?.message || payload?.error || payload?.raw || `GMGN ${pathname} ${res.status}`;
+      const rateLimited = res.status === 429 || /rate limit|temporarily banned/i.test(String(message));
+      if (res.ok) return payload;
+      if (rateLimited && attempt < maxRetries) {
+        const retryAfter = Number(res.headers.get("retry-after"));
+        const backoffMs = Number.isFinite(retryAfter)
+          ? retryAfter * 1000
+          : /temporarily banned/i.test(String(message))
+            ? 60000
+            : Math.min(30000, 3000 * Math.pow(2, attempt));
+        await sleep(backoffMs);
+        continue;
+      }
+      throw new Error(message);
+    } catch (err) {
+      clearTimeout(timeout);
+      if (err.name === "AbortError") {
+        const errMsg = `GMGN ${pathname} timeout after ${timeoutMs}ms`;
+        if (attempt < maxRetries) {
+          await sleep(2000 * Math.pow(2, attempt));
+          continue;
+        }
+        throw new Error(errMsg);
+      }
+      throw err;
     }
-    const message = payload?.message || payload?.error || payload?.raw || `GMGN ${pathname} ${res.status}`;
-    const rateLimited = res.status === 429 || /rate limit|temporarily banned/i.test(String(message));
-    if (res.ok) return payload;
-    if (rateLimited && attempt < maxRetries) {
-      const retryAfter = Number(res.headers.get("retry-after"));
-      const backoffMs = Number.isFinite(retryAfter)
-        ? retryAfter * 1000
-        : /temporarily banned/i.test(String(message))
-          ? 60000
-          : Math.min(30000, 3000 * Math.pow(2, attempt));
-      await sleep(backoffMs);
-      continue;
-    }
-    throw new Error(message);
   }
   throw new Error(`GMGN ${pathname} failed`);
 }

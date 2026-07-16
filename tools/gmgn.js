@@ -462,156 +462,166 @@ async function checkBounceSetup(mint, overrideInterval) {
 
 export async function discoverGmgnPools({ limit = 10 } = {}) {
   const g = config.gmgn;
-  const filtered = [];
-  const stageCounts = {};
+  const overallTimeoutMs = Number(g.discoveryTimeoutMs ?? 110000); // must fit inside index.js 120s wrapper
 
-  // ── Stage 1: rank filter ──────────────────────────────────────────────────
-  const rankPayload = await gmgnFetch("/v1/market/rank", {
-    params: {
-      chain: "sol",
-      interval: normalizeInterval(g.interval),
-      order_by: g.orderBy || "volume",
-      direction: g.direction || "desc",
-      limit: Math.min(100, Math.max(1, Number(g.limit || 100))),
-      filters: g.filters || [],
-      platforms: g.platforms || [],
-    },
-  });
-  const ranked = unwrapList(rankPayload, ["rank", "list", "data"]);
-  const s1 = ranked.filter((token) => {
-    const check = passBasicRankFilter(token);
-    if (!check.pass) {
-      filtered.push({ stage: 1, name: token.symbol || token.address, reason: check.reasons.join(", ") });
-      return false;
-    }
-    return true;
-  }).sort((a, b) => num(b.volume) - num(a.volume))
-    .slice(0, Math.max(limit, Number(g.enrichLimit || 20)));
-  stageCounts.s1 = s1.length;
-  log("gmgn", `Stage1 rank: ${ranked.length} → ${s1.length} pass`);
+  async function doDiscovery() {
+    const filtered = [];
+    const stageCounts = {};
 
-  // ── Stage 2: token info filter ────────────────────────────────────────────
-  const s2 = [];
-  for (const token of s1) {
-    const mint = token.address;
-    try {
-      const infoPayload = await gmgnFetch("/v1/token/info", { params: { chain: "sol", address: mint } });
-      const info = infoPayload?.data?.data || infoPayload?.data || infoPayload;
-      const infoCheck = analyzeTokenInfo(info);
-      if (!infoCheck.passed) {
-        filtered.push({ stage: 2, name: token.symbol || mint, reason: infoCheck.reasons.join(", ") });
-        continue;
+    // ── Stage 1: rank filter (finite limit, avoid huge API payloads) ──────────────────────────────────────────────────
+    const effectiveLimit = Math.min(Number(g.limit || 100), 100);
+    const rankPayload = await gmgnFetch("/v1/market/rank", {
+      params: {
+        chain: "sol",
+        interval: normalizeInterval(g.interval),
+        order_by: g.orderBy || "volume",
+        direction: g.direction || "desc",
+        limit: effectiveLimit,
+        filters: g.filters || [],
+        platforms: g.platforms || [],
+      },
+    });
+    const ranked = unwrapList(rankPayload, ["rank", "list", "data"]);
+    const s1 = ranked.filter((token) => {
+      const check = passBasicRankFilter(token);
+      if (!check.pass) {
+        filtered.push({ stage: 1, name: token.symbol || token.address, reason: check.reasons.join(", ") });
+        return false;
       }
-      s2.push({ token, info, infoCheck });
-    } catch (error) {
-      log("gmgn", `Stage2 skip ${token.symbol || mint}: ${error.message}`);
-      filtered.push({ stage: 2, name: token.symbol || mint, reason: error.message });
-    }
-  }
-  stageCounts.s2 = s2.length;
-  log("gmgn", `Stage2 info: ${s1.length} → ${s2.length} pass`);
+      return true;
+    }).sort((a, b) => num(b.volume) - num(a.volume))
+      .slice(0, Math.max(limit, Number(g.enrichLimit || 10)));
+    stageCounts.s1 = s1.length;
+    log("gmgn", `Stage1 rank: ${ranked.length} → ${s1.length} pass`);
 
-  // ── Stage 3: holders/traders enrichment (no hard filter) + Meteora pool ──
-  const s3 = [];
-  const minTvl = num(g.minTvl ?? config.screening.minTvl ?? 0);
-  for (const { token, info, infoCheck } of s2) {
-    const mint = token.address;
-    try {
-      const [holdersPayload, tradersPayload] = await Promise.all([
-        gmgnFetch("/v1/market/token_top_holders", {
-          params: { chain: "sol", address: mint, limit: g.holdersLimit || 100, order_by: "amount_percentage", direction: "desc" },
-        }),
-        gmgnFetch("/v1/market/token_top_traders", {
-          params: { chain: "sol", address: mint, limit: g.holdersLimit || 100, order_by: "profit", direction: "desc" },
-        }),
-      ]);
-      const holders = unwrapList(holdersPayload, ["list", "holders", "data"]);
-      const traders = unwrapList(tradersPayload, ["list", "traders", "data"]);
-      const holdersCheck = analyzeHoldersAndTraders(holders, traders);
-
-      const topPools = await fetchTopMeteoraDlmmPoolsForMint(mint, minTvl, 2);
-      if (topPools.length === 0) {
-        filtered.push({ stage: 3, name: token.symbol || mint, reason: `no SOL DLMM pool above tvl>${minTvl}` });
-        continue;
-      }
-      s3.push({ token, info, infoCheck, holdersCheck, topPools });
-    } catch (error) {
-      log("gmgn", `Stage3 skip ${token.symbol || mint}: ${error.message}`);
-      filtered.push({ stage: 3, name: token.symbol || mint, reason: error.message });
-    }
-  }
-  stageCounts.s3 = s3.length;
-  log("gmgn", `Stage3 pool: ${s2.length} → ${s3.length} pass`);
-
-  // ── Stage 4: Chart indicators (5m + 15m multi-interval) ───────────────────
-  const s4 = [];
-  if (g.indicatorFilter !== false) {
-    for (const entry of s3) {
-      const mint = entry.token.address;
-      const intervals = config.gmgn.indicatorIntervals?.length ? config.gmgn.indicatorIntervals : ["15_MINUTE"];
-      const requireAll = !!config.gmgn.requireAllIndicatorIntervals;
-      const results = [];
-      let indicatorSignal = null;
-
-      for (const interval of intervals) {
-        try {
-          const result = await checkBounceSetup(mint, interval);
-          results.push({ interval, passed: result.passed, reasons: result.reasons });
-          if (result.passed) indicatorSignal = result.signal;
-        } catch (error) {
-          log("gmgn", `Stage4 ${interval} unavailable for ${entry.token.symbol || mint}: ${error.message}`);
+    // ── Stage 2: token info filter ────────────────────────────────────────────
+    const s2 = [];
+    for (const token of s1) {
+      const mint = token.address;
+      try {
+        const infoPayload = await gmgnFetch("/v1/token/info", { params: { chain: "sol", address: mint } });
+        const info = infoPayload?.data?.data || infoPayload?.data || infoPayload;
+        const infoCheck = analyzeTokenInfo(info);
+        if (!infoCheck.passed) {
+          filtered.push({ stage: 2, name: token.symbol || mint, reason: infoCheck.reasons.join(", ") });
+          continue;
         }
+        s2.push({ token, info, infoCheck });
+      } catch (error) {
+        log("gmgn", `Stage2 skip ${token.symbol || mint}: ${error.message}`);
+        filtered.push({ stage: 2, name: token.symbol || mint, reason: error.message });
       }
-
-      const passed = requireAll
-        ? results.every((r) => r.passed)
-        : results.some((r) => r.passed);
-
-      if (!passed) {
-        const failedReasons = results.filter((r) => !r.passed).map((r) => `[${r.interval}] ${r.reasons.join(", ")}`);
-        filtered.push({ stage: 4, name: entry.token.symbol || mint, reason: failedReasons.join("; ") });
-        continue;
-      }
-      s4.push({ ...entry, indicatorSignal });
     }
-  } else {
-    s4.push(...s3);
-  }
-  stageCounts.s4 = s4.length;
-  log("gmgn", `Stage4 indicators: ${s3.length} → ${s4.length} pass`);
+    stageCounts.s2 = s2.length;
+    log("gmgn", `Stage2 info: ${s1.length} → ${s2.length} pass`);
 
-  // ── Stage 5: pick best pool ───────────────────────────────────────────────
-  const pools = [];
-  for (const { token, info, infoCheck, holdersCheck, topPools, indicatorSignal } of s4) {
-    if (pools.length >= limit) break;
-    const mint = token.address;
-    try {
-      const { pool, detail: poolDetail } = await pickBestPool(topPools);
-      if (!pool) {
-        filtered.push({ stage: 5, name: token.symbol || mint, reason: "pool selection failed" });
-        continue;
+    // ── Stage 3: holders/traders enrichment (no hard filter) + Meteora pool ──
+    const s3 = [];
+    const minTvl = num(g.minTvl ?? config.screening.minTvl ?? 0);
+    for (const { token, info, infoCheck } of s2) {
+      const mint = token.address;
+      try {
+        const [holdersPayload, tradersPayload] = await Promise.all([
+          gmgnFetch("/v1/market/token_top_holders", {
+            params: { chain: "sol", address: mint, limit: g.holdersLimit || 100, order_by: "amount_percentage", direction: "desc" },
+          }),
+          gmgnFetch("/v1/market/token_top_traders", {
+            params: { chain: "sol", address: mint, limit: g.holdersLimit || 100, order_by: "profit", direction: "desc" },
+          }),
+        ]);
+        const holders = unwrapList(holdersPayload, ["list", "holders", "data"]);
+        const traders = unwrapList(tradersPayload, ["list", "traders", "data"]);
+        const holdersCheck = analyzeHoldersAndTraders(holders, traders);
+
+        const topPools = await fetchTopMeteoraDlmmPoolsForMint(mint, minTvl, 2);
+        if (topPools.length === 0) {
+          filtered.push({ stage: 3, name: token.symbol || mint, reason: `no SOL DLMM pool above tvl>${minTvl}` });
+          continue;
+        }
+        s3.push({ token, info, infoCheck, holdersCheck, topPools });
+      } catch (error) {
+        log("gmgn", `Stage3 skip ${token.symbol || mint}: ${error.message}`);
+        filtered.push({ stage: 3, name: token.symbol || mint, reason: error.message });
       }
-      const security = {};
-      const candidate = condenseGmgnCandidate({ token, pool, poolDetail, security, info, infoAnalysis: infoCheck, holdersAnalysis: holdersCheck, indicatorSignal });
-      if (!candidate.pool || !candidate.base?.mint) {
-        filtered.push({ stage: 5, name: token.symbol || mint, reason: "incomplete pool mapping" });
-        continue;
-      }
-      pools.push(candidate);
-    } catch (error) {
-      log("gmgn", `Stage5 skip ${token.symbol || mint}: ${error.message}`);
-      filtered.push({ stage: 5, name: token.symbol || mint, reason: error.message });
     }
-  }
-  stageCounts.s5 = pools.length;
-  log("gmgn", `Stage5 final: ${s4.length} → ${pools.length} candidates`);
+    stageCounts.s3 = s3.length;
+    log("gmgn", `Stage3 pool: ${s2.length} → ${s3.length} pass`);
 
-  return {
-    total: ranked.length,
-    stage_counts: stageCounts,
-    pools,
-    filtered_examples: filtered,
-  };
+    // ── Stage 4: Chart indicators (5m + 15m multi-interval) ───────────────────
+    const s4 = [];
+    if (g.indicatorFilter !== false) {
+      for (const entry of s3) {
+        const mint = entry.token.address;
+        const intervals = config.gmgn.indicatorIntervals?.length ? config.gmgn.indicatorIntervals : ["15_MINUTE"];
+        const requireAll = !!config.gmgn.requireAllIndicatorIntervals;
+        const results = [];
+        let indicatorSignal = null;
+
+        for (const interval of intervals) {
+          try {
+            const result = await checkBounceSetup(mint, interval);
+            results.push({ interval, passed: result.passed, reasons: result.reasons });
+            if (result.passed) indicatorSignal = result.signal;
+          } catch (error) {
+            log("gmgn", `Stage4 ${interval} unavailable for ${entry.token.symbol || mint}: ${error.message}`);
+          }
+        }
+
+        const passed = requireAll
+          ? results.every((r) => r.passed)
+          : results.some((r) => r.passed);
+
+        if (!passed) {
+          const failedReasons = results.filter((r) => !r.passed).map((r) => `[${r.interval}] ${r.reasons.join(", ")}`);
+          filtered.push({ stage: 4, name: entry.token.symbol || mint, reason: failedReasons.join("; ") });
+          continue;
+        }
+        s4.push({ ...entry, indicatorSignal });
+      }
+    } else {
+      s4.push(...s3);
+    }
+    stageCounts.s4 = s4.length;
+    log("gmgn", `Stage4 indicators: ${s3.length} → ${s4.length} pass`);
+
+    // ── Stage 5: pick best pool ───────────────────────────────────────────────
+    const pools = [];
+    for (const { token, info, infoCheck, holdersCheck, topPools, indicatorSignal } of s4) {
+      if (pools.length >= limit) break;
+      const mint = token.address;
+      try {
+        const { pool, detail: poolDetail } = await pickBestPool(topPools);
+        if (!pool) {
+          filtered.push({ stage: 5, name: token.symbol || mint, reason: "pool selection failed" });
+          continue;
+        }
+        const security = {};
+        const candidate = condenseGmgnCandidate({ token, pool, poolDetail, security, info, infoAnalysis: infoCheck, holdersAnalysis: holdersCheck, indicatorSignal });
+        if (!candidate.pool || !candidate.base?.mint) {
+          filtered.push({ stage: 5, name: token.symbol || mint, reason: "incomplete pool mapping" });
+          continue;
+        }
+        pools.push(candidate);
+      } catch (error) {
+        log("gmgn", `Stage5 skip ${token.symbol || mint}: ${error.message}`);
+        filtered.push({ stage: 5, name: token.symbol || mint, reason: error.message });
+      }
+    }
+    stageCounts.s5 = pools.length;
+    log("gmgn", `Stage5 final: ${s4.length} → ${pools.length} candidates`);
+
+    return {
+      total: ranked.length,
+      stage_counts: stageCounts,
+      pools,
+      filtered_examples: filtered,
+    };
+  }
+
+  return Promise.race([
+    doDiscovery(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`discoverGmgnPools timed out after ${overallTimeoutMs}ms`)), overallTimeoutMs)),
+  ]);
 }
 
 export function formatGmgnCandidateForPrompt(p) {

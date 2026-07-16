@@ -82,11 +82,12 @@ export const config = {
     maxDeployAmount: u.maxDeployAmount ?? 50,
   },
 
-  // ─── Pool Screening Thresholds ───────────
+// ─── Pool Screening Thresholds ───────────
   screening: {
     source:            u.screeningSource    ?? "meteora", // meteora | gmgn
     excludeHighSupplyConcentration: u.excludeHighSupplyConcentration ?? true,
     minFeeActiveTvlRatio: u.minFeeActiveTvlRatio ?? 0.05,
+    maxVolatility: u.maxVolatility ?? 4,
     minTvl:            u.minTvl            ?? 10_000,
     maxTvl:            u.maxTvl !== undefined ? u.maxTvl : 150_000,
     minVolume:         u.minVolume         ?? 500,
@@ -99,7 +100,7 @@ export const config = {
     maxBinStep:        u.maxBinStep        ?? 125,
     timeframe:         u.timeframe         ?? "5m",
     category:          u.category          ?? "trending",
-    minTokenFeesSol:   u.minTokenFeesSol   ?? 30,  // global fees paid (priority+jito tips). below = bundled/scam
+    minTokenFeesSol:   u.minTokenFeesSol   ?? 30,
     requireSolSupertrend: u.requireSolSupertrend ?? false,
     solSupertrendTimeframe: u.solSupertrendTimeframe ?? "both",
     useDiscordSignals: u.useDiscordSignals ?? false,
@@ -367,21 +368,22 @@ export function reloadScreeningThresholds() {
     if (fresh.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = fresh.minFeeActiveTvlRatio;
     if (fresh.minTokenFeesSol  != null) s.minTokenFeesSol  = fresh.minTokenFeesSol;
     if (fresh.maxTop10Pct      != null) s.maxTop10Pct      = fresh.maxTop10Pct;
-    if (fresh.useDiscordSignals !== undefined) s.useDiscordSignals = fresh.useDiscordSignals;
-    if (fresh.discordSignalMode != null) s.discordSignalMode = fresh.discordSignalMode;
-    if (fresh.excludeHighSupplyConcentration !== undefined) s.excludeHighSupplyConcentration = fresh.excludeHighSupplyConcentration;
-    if (fresh.minOrganic     != null) s.minOrganic     = fresh.minOrganic;
-    if (fresh.minQuoteOrganic != null) s.minQuoteOrganic = fresh.minQuoteOrganic;
-    if (fresh.minHolders     != null) s.minHolders     = fresh.minHolders;
-    if (fresh.minMcap        != null) s.minMcap        = fresh.minMcap;
-    if (fresh.maxMcap        != null) s.maxMcap        = fresh.maxMcap;
-    if (fresh.minTvl         != null) s.minTvl         = fresh.minTvl;
-    if (fresh.maxTvl         !== undefined) s.maxTvl   = fresh.maxTvl;
-    if (fresh.minVolume      != null) s.minVolume      = fresh.minVolume;
-    if (fresh.minBinStep     != null) s.minBinStep     = fresh.minBinStep;
-    if (fresh.maxBinStep     != null) s.maxBinStep     = fresh.maxBinStep;
-    if (fresh.timeframe         != null) s.timeframe         = fresh.timeframe;
-    if (fresh.category          != null) s.category          = fresh.category;
+if (fresh.useDiscordSignals !== undefined) s.useDiscordSignals = fresh.useDiscordSignals;
+     if (fresh.discordSignalMode != null) s.discordSignalMode = fresh.discordSignalMode;
+     if (fresh.excludeHighSupplyConcentration !== undefined) s.excludeHighSupplyConcentration = fresh.excludeHighSupplyConcentration;
+     if (fresh.minOrganic     != null) s.minOrganic     = fresh.minOrganic;
+     if (fresh.minQuoteOrganic != null) s.minQuoteOrganic = fresh.minQuoteOrganic;
+     if (fresh.minHolders     != null) s.minHolders     = fresh.minHolders;
+     if (fresh.minMcap        != null) s.minMcap        = fresh.minMcap;
+     if (fresh.maxMcap        != null) s.maxMcap        = fresh.maxMcap;
+     if (fresh.minTvl         != null) s.minTvl         = fresh.minTvl;
+     if (fresh.maxTvl         !== undefined) s.maxTvl   = fresh.maxTvl;
+     if (fresh.minVolume      != null) s.minVolume      = fresh.minVolume;
+     if (fresh.minBinStep     != null) s.minBinStep     = fresh.minBinStep;
+if (fresh.maxBinStep     != null) s.maxBinStep     = fresh.maxBinStep;
+      if (fresh.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = fresh.minFeeActiveTvlRatio;
+      if (fresh.timeframe         != null) s.timeframe         = fresh.timeframe;
+      if (fresh.category          != null) s.category          = fresh.category;
     if (fresh.minTokenAgeHours  !== undefined) s.minTokenAgeHours = fresh.minTokenAgeHours;
     if (fresh.maxTokenAgeHours  !== undefined) s.maxTokenAgeHours = fresh.maxTokenAgeHours;
     if (fresh.avoidPvpSymbols   !== undefined) s.avoidPvpSymbols = fresh.avoidPvpSymbols;

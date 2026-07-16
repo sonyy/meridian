@@ -888,12 +888,47 @@ export async function deployPosition({
       // ghost positions where Phase 1 (create) committed on-chain but Phase 2
       // (add liquidity) failed.
 
-      // Helper: set blockhash + fee payer and simulate without signature verification
+      // Helper: set blockhash + fee payer and simulate without signature verification.
+      // @solana/web3.js ≥1.x simulateTransaction throws "Invalid arguments" for a legacy Transaction
+      // with an object config (expects undefined or Array<Signer>). DLMM SDK returns legacy Transactions,
+      // so we call the RPC directly — same as the internal versioned-tx path.
+      // Uses "finalized" blockhash so lagging / load-balanced replicas still recognize it, and
+      // retries transient BlockhashNotFound (replica race or blockhash expired between fetch + simulate).
       const simulateTx = async (tx) => {
-        const { blockhash } = await getConnection().getLatestBlockhash();
+        let lastErr = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const { blockhash } = await getConnection().getLatestBlockhash("finalized");
+          tx.recentBlockhash = blockhash;
+          tx.feePayer = wallet.publicKey;
+          const raw = tx.serialize({ requireAllSignatures: false, verifySignatures: false });
+          const encoded = raw.toString("base64");
+          const res = await getConnection()._rpcRequest("simulateTransaction", [
+            encoded,
+            { encoding: "base64", sigVerify: false },
+          ]);
+          if ("error" in res)
+            throw new Error("simulateTransaction: " + (res.error?.message || JSON.stringify(res.error)));
+          if (res.result.value?.err) {
+            const errText = JSON.stringify(res.result.value.err);
+            const err = new Error(`simulation failed: ${errText}`);
+            if (/BlockhashNotFound/i.test(errText)) {
+              lastErr = err;
+              await sleep(500 * (attempt + 1)); // transient — re-fetch blockhash and retry
+              continue;
+            }
+            throw err;
+          }
+          return res.result;
+        }
+        throw lastErr || new Error("simulation retry budget exhausted");
+      };
+
+      // Re-fetch a fresh finalized blockhash right before sending so the tx isn't rejected for an
+      // expired blockhash after a long simulate / queue gap.
+      const refreshBlockhash = async (tx) => {
+        const { blockhash } = await getConnection().getLatestBlockhash("finalized");
         tx.recentBlockhash = blockhash;
-        tx.feePayer = wallet.publicKey;
-        return getConnection().simulateTransaction(tx, { sigVerify: false });
+        if (!tx.feePayer) tx.feePayer = wallet.publicKey;
       };
 
       // Phase 1: Create empty position (may be multiple txs)
@@ -911,15 +946,13 @@ export async function deployPosition({
       }
       const createTxArray = Array.isArray(createTxs) ? createTxs : [createTxs];
 
-      // Simulate Phase 1 txs before sending
+      // Simulate Phase 1 txs before sending (retries transient BlockhashNotFound internally)
       for (let i = 0; i < createTxArray.length; i++) {
-        const sim = await simulateTx(createTxArray[i]);
-        if (sim.value.err) {
-          throw new Error(`Phase 1 create tx ${i + 1}/${createTxArray.length} simulation failed: ${JSON.stringify(sim.value.err)}`);
-        }
+        await simulateTx(createTxArray[i]);
       }
 
       for (let i = 0; i < createTxArray.length; i++) {
+        await refreshBlockhash(createTxArray[i]);
         const signers = i === 0 ? [wallet, newPosition] : [wallet];
         const txHash = await sendAndConfirmTransaction(getConnection(), createTxArray[i], signers);
         txHashes.push(txHash);
@@ -943,26 +976,31 @@ export async function deployPosition({
       }
       const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
 
-      // Simulate Phase 2 txs BEFORE sending — if any fails, close empty position
+      // Simulate Phase 2 txs BEFORE sending — if any fails, close empty position to reclaim rent.
+      // simulateTx now throws on sim error (including non-transient), so catch to clean up + rethrow.
       for (let i = 0; i < addTxArray.length; i++) {
-        const sim = await simulateTx(addTxArray[i]);
-        if (sim.value.err) {
-          log("deploy", `Add liquidity tx ${i + 1}/${addTxArray.length} SIMULATION FAILED — closing empty position to reclaim rent.`);
-          try {
-            const closeTx = await pool.closePosition({
-              owner: wallet.publicKey,
-              position: { publicKey: newPosition.publicKey },
-            });
-            await sendAndConfirmTransaction(getConnection(), closeTx, [wallet]);
-            log("deploy", `Empty position ${newPosition.publicKey.toString()} closed after simulation failure.`);
-          } catch (closeErr) {
-            log("deploy_warn", `Cleanup close of empty position failed: ${closeErr.message}. User may need to close manually.`);
+        try {
+          await simulateTx(addTxArray[i]);
+        } catch (simErr) {
+          if (/simulation failed/i.test(simErr.message)) {
+            log("deploy", `Add liquidity tx ${i + 1}/${addTxArray.length} SIMULATION FAILED — closing empty position to reclaim rent.`);
+            try {
+              const closeTx = await pool.closePosition({
+                owner: wallet.publicKey,
+                position: { publicKey: newPosition.publicKey },
+              });
+              await sendAndConfirmTransaction(getConnection(), closeTx, [wallet]);
+              log("deploy", `Empty position ${newPosition.publicKey.toString()} closed after simulation failure.`);
+            } catch (closeErr) {
+              log("deploy_warn", `Cleanup close of empty position failed: ${closeErr.message}. User may need to close manually.`);
+            }
           }
-          throw new Error(`Phase 2 add liquidity tx ${i + 1}/${addTxArray.length} simulation failed: ${JSON.stringify(sim.value.err)}`);
+          throw simErr;
         }
       }
 
       for (let i = 0; i < addTxArray.length; i++) {
+        await refreshBlockhash(addTxArray[i]);
         const txHash = await sendAndConfirmTransaction(getConnection(), addTxArray[i], [wallet]);
         txHashes.push(txHash);
         log("deploy", `Add liquidity tx ${i + 1}/${addTxArray.length}: ${txHash}`);
