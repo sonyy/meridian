@@ -1,44 +1,61 @@
 # Meridian
 
-Autonomous Meteora DLMM liquidity management agent for Solana. LLM-driven screening, management, and autonomous trading.
+Autonomous Meteora DLMM liquidity management agent for Solana. LLM-driven screening, management, and self-learning.
 
 ## What It Does
 
-- **Pool Screening**: Continuous scanning of Meteora pools by thresholds
-- **Position Management**: Automated monitoring/close/redeploy based on PnL
-- **Self-Learning**: Evolves thresholds from closed position performance
+- **Pool Screening**: Scan Meteora DLMM pools by thresholds (fee/TVL, organic, mcap, holders)
+- **Position Management**: Monitor, claim fees, close positions autonomously
+- **Self-Learning**: Study top LPers, evolve screening thresholds from performance
 - **Multi-Interface**: Web UI + Discord listener + Telegram chat + CLI
-- **Two Agents**: SCREENING (30min) + MANAGEMENT (10min) cycles
+
+## How It Works
+
+Two specialized agents on independent cron schedules:
+
+| Agent | Interval | Role |
+|-------|----------|------|
+| **Screening** | Every 30 min | Find best pools → deploy |
+| **Management** | Every 10 min | Evaluate positions → act |
 
 ## Tech Stack
 
 | Layer | Tech | Purpose |
 |-------|------|---------|
 | Runtime | Node.js 22+ (ESM) | Main daemon |
-| LLM | OpenRouter (GPT-4/Claude) | AI reasoning |
-| Storage | JSON files | Per-pool memory & lessons |
+| LLM | OpenRouter | AI reasoning |
 | Solana | @meteora-ag/dlmm | On-chain operations |
-| Database | SQLite | Positions registry |
+| Storage | JSON + SQLite | State management |
 
-## Entry Points
+## Getting Started
 
 ```bash
-# Full daemon (REPL + cron + Telegram)
-npm start
+git clone git@github.com:yunus-0x/meridian.git
+cd meridian
+npm install
+npm run setup  # First-run wizard
 
-# First-time setup wizard
-npm run setup
+# Run
+npm start      # Daemon with REPL + cron
+npm run dev    # Development mode
+npm run pm2:start  # PM2 for always-on
+```
 
-# One-shot CLI operations
-node cli.js <command>
+## Config
 
-# PM2 for always-on (VPS)
-npm run pm2:start
+Set `.env`:
+
+```env
+WALLET_PRIVATE_KEY=your_base58_private_key
+RPC_URL=https://mainnet.helius-rpc.com/?api-key=YOUR_KEY
+OPENROUTER_API_KEY=sk-or-...
+TELEGRAM_BOT_TOKEN=123456:ABC...
+DRY_RUN=true
 ```
 
 ## Commands
 
-```
+```bash
 # Portfolio & Status
 /status /positions /balance /pool <addr>
 
@@ -47,27 +64,6 @@ npm run pm2:start
 
 # Management
 /screen /manage /close <n> /claim <position>
-
-# Discord listener (standalone)
-cd discord-listener && npm start
-```
-
-## Config
-
-Set `.env` (.gitignored):
-
-```env
-WALLET_PRIVATE_KEY=your_base58_private_key
-RPC_URL=https://mainnet.helius-rpc.com/?api-key=YOUR_KEY
-OPENROUTER_API_KEY=sk-or-...
-TELEGRAM_BOT_TOKEN=123456:ABC...      # optional
-DRY_RUN=true                             # set false for live
-```
-
-Copy and edit:
-
-```bash
-cp user-config.example.json user-config.json
 ```
 
 ## Architecture
@@ -79,24 +75,14 @@ index.js (daemon)
    └─ MANAGER: evaluates positions, acts
 ```
 
-**Critical invariants:**
-- Lazy SDK load (@meteora-ag/dlmm dynamic import)
-- ONCE_PER_SESSION locks for DEPLOY / SWAP / CLOSE
-- Position-cache TTL (5 min) + force: true for safety
-- Deterministic management (5 hard rules) + optional LLM
-
-## Development
-
-```bash
-npm run dev    # Hot reload
-node cli.js positions
-node cli.js screen --dry-run
-```
+**Key Invariants:**
+- Lazy SDK load (dynamic import)
+- ONCE_PER_SESSION locks for critical operations
+- Position cache with force:true for safety
+- Deterministic rules + optional LLM decisions
 
 ## Warnings
 
-- This software carries real financial risk
-- Use DRY_RUN=true to verify before live execution
-- Secrets in `.env`; config in `user-config.json`
+⚠️ Autonomous trading — real financial risk. Always start with `DRY_RUN=true`.
 
-**Disclaimer:** Autonomous trading — lose funds possible. Not financial advice.
+**Disclaimer:** Not financial advice. You can lose funds. Use responsibly.

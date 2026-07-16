@@ -628,15 +628,15 @@ export async function getTopCandidates({ limit = 10, occupiedPools, occupiedMint
         pushFilteredReason(filteredOut, p, `fee/active-TVL ${Number.isFinite(feeActiveTvlRatio) ? feeActiveTvlRatio : "unknown"} below minFeeActiveTvlRatio ${minFeeActiveTvlRatio}`);
         return false;
       }
-      if (Number.isFinite(minFeeActiveTvlRatio) && minFeeActiveTvlRatio > 0 && (!Number.isFinite(feeActiveTvlRatio) || feeActiveTvlRatio < minFeeActiveTvlRatio)) {
-        pushFilteredReason(filteredOut, p, `fee/active-TVL ${Number.isFinite(feeActiveTvlRatio) ? feeActiveTvlRatio : "unknown"} below minFeeActiveTvlRatio ${minFeeActiveTvlRatio}`);
+      if (config.screening.maxFeeActiveTvlRatio != null && feeActiveTvlRatio > config.screening.maxFeeActiveTvlRatio) {
+        pushFilteredReason(filteredOut, p, `fee/active-TVL ${feeActiveTvlRatio} above maxFeeActiveTvlRatio ${config.screening.maxFeeActiveTvlRatio}`);
         return false;
       }
       if (!isUsableVolatility(p.volatility)) {
         pushFilteredReason(filteredOut, p, `volatility ${p.volatility ?? "unknown"} unusable`);
         return false;
       }
-      if (p.volatility > config.screening.maxVolatility) {
+      if (config.screening.maxVolatility != null && p.volatility > config.screening.maxVolatility) {
         pushFilteredReason(filteredOut, p, `volatility ${p.volatility} above maxVolatility ${config.screening.maxVolatility}`);
         return false;
       }

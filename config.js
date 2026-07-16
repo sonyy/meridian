@@ -87,6 +87,7 @@ export const config = {
     source:            u.screeningSource    ?? "meteora", // meteora | gmgn
     excludeHighSupplyConcentration: u.excludeHighSupplyConcentration ?? true,
     minFeeActiveTvlRatio: u.minFeeActiveTvlRatio ?? 0.05,
+    maxFeeActiveTvlRatio: u.maxFeeActiveTvlRatio ?? null,
     maxVolatility: u.maxVolatility ?? 4,
     minTvl:            u.minTvl            ?? 10_000,
     maxTvl:            u.maxTvl !== undefined ? u.maxTvl : 150_000,
@@ -380,8 +381,9 @@ if (fresh.useDiscordSignals !== undefined) s.useDiscordSignals = fresh.useDiscor
      if (fresh.maxTvl         !== undefined) s.maxTvl   = fresh.maxTvl;
      if (fresh.minVolume      != null) s.minVolume      = fresh.minVolume;
      if (fresh.minBinStep     != null) s.minBinStep     = fresh.minBinStep;
-if (fresh.maxBinStep     != null) s.maxBinStep     = fresh.maxBinStep;
-      if (fresh.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = fresh.minFeeActiveTvlRatio;
+      if (fresh.maxBinStep     != null) s.maxBinStep     = fresh.maxBinStep;
+      if (fresh.maxFeeActiveTvlRatio !== undefined) s.maxFeeActiveTvlRatio = fresh.maxFeeActiveTvlRatio;
+      if (fresh.maxVolatility !== undefined) s.maxVolatility = fresh.maxVolatility;
       if (fresh.timeframe         != null) s.timeframe         = fresh.timeframe;
       if (fresh.category          != null) s.category          = fresh.category;
     if (fresh.minTokenAgeHours  !== undefined) s.minTokenAgeHours = fresh.minTokenAgeHours;
