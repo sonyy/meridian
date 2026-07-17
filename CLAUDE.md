@@ -466,6 +466,22 @@ When scheduling work, follow the **`_busy` flag + cooldown** pattern. `_manageme
 
 ---
 
+## ⚡ Live vs Dry-Run parity (HARD RULE)
+
+- **Keep live and DRY_RUN behavior IDENTICAL.** Any logic, threshold, filter,
+  safety check, or flow change made while `DRY_RUN=true` (npm run dev) MUST also
+  be applied to live mode — and any change made in live MUST also be reflected
+  in dry-run. The two modes must never diverge in decision-making.
+- `DRY_RUN` only skips the **actual on-chain tx** (deploy/claim/close/swap). It
+  must NOT skip, alter, or shortcut any screening, scoring, safety check
+  (`runSafetyChecks`), gating, or logging that live mode runs. (Note the existing
+  bug: the `deploy_position` SOL-balance safety check is skipped under DRY_RUN —
+  that divergence is a known tech-debt item, not a pattern to copy.)
+- Before finishing any change, diff the dry-run path against the live path for
+  the touched code and confirm they still produce the same candidate/decision
+  set. If a guard only runs in one mode, that is a bug — fix it.
+- Never leave a fix in dry-run "for testing" without also landing it in live.
+
 ## What to read next
 
 - Adding a new tool → `tools/definitions.js` + `tools/executor.js` + `agent.js` (see "Adding a new tool" above).
